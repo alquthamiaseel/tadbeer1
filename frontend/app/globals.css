@@ -1,0 +1,175 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens.
+ *
+ * Everything visual reads from these — no component hard-codes a hex value.
+ * Light is the default; the dark block only ever overrides the same names, so
+ * a component never has to know which theme is active.
+ */
+:root {
+  --background: #fafafa;
+  --surface: #ffffff;
+  --surface-2: #f4f4f5;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --foreground: #18181b;
+  --muted: #71717a;
+  --muted-2: #a1a1aa;
+
+  --accent: #6d28d9;
+  --accent-strong: #5b21b6;
+  --accent-soft: #f3eefc;
+  --accent-foreground: #ffffff;
+
+  --pending: #a1a1aa;
+  --running: #2563eb;
+  --running-soft: #eff6ff;
+  --waiting: #d97706;
+  --waiting-soft: #fffbeb;
+  --complete: #059669;
+  --complete-soft: #ecfdf5;
+  --failed: #dc2626;
+  --failed-soft: #fef2f2;
+
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+  --shadow-md: 0 4px 16px -4px rgb(0 0 0 / 0.08), 0 1px 2px 0 rgb(0 0 0 / 0.04);
+  --shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.14);
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0c;
+    --surface: #131317;
+    --surface-2: #1a1a1f;
+    --border: #26262c;
+    --border-strong: #34343c;
+    --foreground: #f4f4f5;
+    --muted: #9a9aa2;
+    --muted-2: #6f6f78;
+
+    --accent: #a78bfa;
+    --accent-strong: #c4b5fd;
+    --accent-soft: #211b36;
+    --accent-foreground: #0a0a0c;
+
+    --pending: #52525b;
+    --running: #60a5fa;
+    --running-soft: #101d33;
+    --waiting: #fbbf24;
+    --waiting-soft: #2c2308;
+    --complete: #34d399;
+    --complete-soft: #0b2519;
+    --failed: #f87171;
+    --failed-soft: #2c1212;
+
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+    --shadow-md: 0 4px 16px -4px rgb(0 0 0 / 0.5), 0 1px 2px 0 rgb(0 0 0 / 0.3);
+    --shadow-lg: 0 16px 40px -8px rgb(0 0 0 / 0.6);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-2: var(--muted-2);
+
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-pending: var(--pending);
+  --color-running: var(--running);
+  --color-running-soft: var(--running-soft);
+  --color-waiting: var(--waiting);
+  --color-waiting-soft: var(--waiting-soft);
+  --color-complete: var(--complete);
+  --color-complete-soft: var(--complete-soft);
+  --color-failed: var(--failed);
+  --color-failed-soft: var(--failed-soft);
+
+  --shadow-token-sm: var(--shadow-sm);
+  --shadow-token-md: var(--shadow-md);
+  --shadow-token-lg: var(--shadow-lg);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  --animate-fade-in: fade-in 0.4s ease-out both;
+  --animate-rise: rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  /* A faint radial wash behind everything, not a texture on it — the
+     difference between a background that reads as "designed" and one that
+     reads as "decorated". */
+  background-image: radial-gradient(
+    ellipse 1100px 560px at 50% -8%,
+    color-mix(in oklab, var(--accent) 7%, transparent),
+    transparent
+  );
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 30%, transparent);
+}
+
+/* Every scrollable region in the app shares one thin, unobtrusive scrollbar. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+
+.mono-nums {
+  font-variant-numeric: tabular-nums;
+}
