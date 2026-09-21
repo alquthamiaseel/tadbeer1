@@ -1,5 +1,6 @@
 import { Outlet } from 'react-router-dom'
 import Sidebar from './Sidebar.jsx'
+import CreateProjectModal from './CreateProjectModal.jsx'
 
 // ---------------------------------------------------------------------------
 // Layout
@@ -16,6 +17,7 @@ export default function Layout() {
       <main className="flex-1 overflow-y-auto p-8">
         <Outlet />
       </main>
+      <CreateProjectModal />
     </div>
   )
 }

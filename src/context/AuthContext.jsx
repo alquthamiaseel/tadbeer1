@@ -36,12 +36,12 @@ export function AuthProvider({ children }) {
   // Called by the Login page. In a real app this would call an API and
   // check the password - for now we just "log in" with whatever was typed.
   function login({ email }) {
-    setUser({ fullName: email.split('@')[0], email })
+    setUser({ fullName: email.split('@')[0], email, joinedAt: new Date().toISOString() })
   }
 
   // Called by the Register page once the sign-up form is submitted.
   function register(userDetails) {
-    setUser(userDetails)
+    setUser({ ...userDetails, joinedAt: new Date().toISOString() })
   }
 
   // Called from the Sidebar/Profile page to sign the user out.

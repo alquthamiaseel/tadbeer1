@@ -9,6 +9,7 @@ import {
   PlusIcon,
 } from './icons.jsx'
 import { useAuth } from '../context/AuthContext.jsx'
+import { useProjects } from '../context/ProjectsContext.jsx'
 
 // The main navigation links shown in the middle of the sidebar.
 // Kept as data (instead of copy/pasting a <NavLink> five times) so adding
@@ -35,6 +36,7 @@ function getInitials(fullName) {
 
 export default function Sidebar() {
   const { user } = useAuth()
+  const { openCreateModal } = useProjects()
 
   return (
     <aside className="flex h-screen w-72 shrink-0 flex-col justify-between border-r border-slate-800 bg-slate-950 px-4 py-6">
@@ -50,7 +52,10 @@ export default function Sidebar() {
           </div>
         </div>
 
-        <button className="mb-6 flex w-full items-center justify-center gap-2 rounded-lg bg-teal-500 py-2.5 font-semibold text-white transition hover:bg-teal-400">
+        <button
+          onClick={openCreateModal}
+          className="mb-6 flex w-full items-center justify-center gap-2 rounded-lg bg-teal-500 py-2.5 font-semibold text-white transition hover:bg-teal-400"
+        >
           <PlusIcon className="h-4 w-4" />
           New Project
         </button>

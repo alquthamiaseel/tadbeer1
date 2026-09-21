@@ -182,3 +182,66 @@ export function LogoutIcon({ className }) {
     </svg>
   )
 }
+
+export function BellIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="M6 9a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6H4c.5-.5 2-2 2-6Z" />
+      <path d="M10 19a2 2 0 0 0 4 0" />
+    </svg>
+  )
+}
+
+export function PencilIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" />
+      <path d="m13.5 6.5 3 3" />
+    </svg>
+  )
+}
+
+export function XIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  )
+}
+
+export function UsersIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <circle cx="9" cy="8" r="3.2" />
+      <path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5" />
+      <path d="M16.5 5a3 3 0 0 1 0 6" />
+      <path d="M21 20c0-2.8-2-4.8-4.5-5.4" />
+    </svg>
+  )
+}
+
+export function ExternalLinkIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="M14 4h6v6" />
+      <path d="M10 14 20 4" />
+      <path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+    </svg>
+  )
+}
+
+export function ChatIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="M4 5h16v11H8l-4 4Z" />
+    </svg>
+  )
+}
+
+export function ChevronDownIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  )
+}
