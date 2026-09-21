@@ -76,10 +76,13 @@ function IntegrationRow({ icon: Icon, label, value }) {
   )
 }
 
+// Suffixes appended to this project's own /projects/:id path, not the
+// flat routes - so these always link to this project's pages, not
+// whichever project happens to be "most recent".
 const QUICK_ACTIONS = [
-  { label: 'View Diagrams', to: '/diagrams', primary: true },
-  { label: 'View Requirements', to: '/requirements' },
-  { label: 'View Timeline', to: '/timeline' },
+  { label: 'View Diagrams', suffix: '/diagrams', primary: true },
+  { label: 'View Requirements', suffix: '/requirements' },
+  { label: 'View Timeline', suffix: '/timeline' },
 ]
 
 export default function ProjectOverview() {
@@ -163,10 +166,18 @@ export default function ProjectOverview() {
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-teal-50 text-sm font-semibold text-teal-700">
                   {member.initials}
                 </div>
-                <p className="font-medium text-slate-900">{member.name}</p>
+                <div>
+                  <p className="font-medium text-slate-900">{member.name}</p>
+                  <p className="text-xs text-slate-500">{member.role}</p>
+                </div>
               </div>
             ))}
           </div>
+          {/* No real Asana integration yet, so this is the only honest
+              thing to say - there is nobody else to list. */}
+          <p className="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-400">
+            Connect an Asana project to add the rest of the team here.
+          </p>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-6">
@@ -201,10 +212,10 @@ export default function ProjectOverview() {
           <h2 className="font-semibold text-slate-900">Quick Actions</h2>
         </div>
         <div className="flex flex-wrap gap-3">
-          {QUICK_ACTIONS.map(({ label, to, primary }) => (
+          {QUICK_ACTIONS.map(({ label, suffix, primary }) => (
             <Link
-              key={to}
-              to={to}
+              key={suffix}
+              to={`/projects/${project.id}${suffix}`}
               className={
                 primary
                   ? 'rounded-lg bg-teal-500 px-5 py-2.5 font-semibold text-white transition hover:bg-teal-400'

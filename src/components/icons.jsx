@@ -245,3 +245,37 @@ export function ChevronDownIcon({ className }) {
     </svg>
   )
 }
+
+export function TrashIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="M4 7h16" />
+      <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+      <path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
+    </svg>
+  )
+}
+
+export function RobotIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <rect x="5" y="9" width="14" height="10" rx="2" />
+      <path d="M12 9V5" />
+      <circle cx="12" cy="4" r="1.3" />
+      <circle cx="9" cy="14" r="1.2" />
+      <circle cx="15" cy="14" r="1.2" />
+      <path d="M3 12h2M19 12h2" />
+    </svg>
+  )
+}
+
+export function PaletteIcon({ className }) {
+  return (
+    <svg {...defaultProps} className={className}>
+      <path d="M12 3a9 8 0 1 0 0 16c1 0 1.8-.8 1.8-1.8 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-1 .8-1.8 1.8-1.8H16a4 4 0 0 0 4-4c0-4.4-3.6-8-8-8Z" />
+      <circle cx="7.5" cy="10.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="10.5" cy="7" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14.5" cy="7.5" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}

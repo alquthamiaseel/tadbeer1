@@ -33,6 +33,21 @@ export function getCurrentPhaseName(project) {
   return PROJECT_PHASES[project.currentPhaseIndex]
 }
 
+// Diagram counts are always derived from `project.diagrams`, never stored
+// separately - there's only one source of truth, and it's honestly empty
+// until a real AI agent produces diagrams to review.
+export function getApprovedDiagramsCount(project) {
+  return project.diagrams.filter((diagram) => diagram.status === 'accepted').length
+}
+
+export function getPendingDiagramsCount(project) {
+  return project.diagrams.filter((diagram) => diagram.status === 'pending').length
+}
+
+export function getReviewedDiagramsCount(project) {
+  return project.diagrams.filter((diagram) => diagram.status !== 'pending').length
+}
+
 // Phase name -> badge color, shared by ProjectCard (Dashboard) and
 // ProjectOverview so a project's phase reads the same color everywhere.
 export const PHASE_BADGE_CLASSES = {

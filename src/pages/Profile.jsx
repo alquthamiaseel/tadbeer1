@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { useProjects } from '../context/ProjectsContext.jsx'
+import { getReviewedDiagramsCount } from '../utils/projectStats.js'
+import Toggle from '../components/Toggle.jsx'
 import {
   UserIcon,
   MailIcon,
@@ -58,27 +60,6 @@ function ProfileDetail({ icon: Icon, label, isEditing, name, value, display, onC
   )
 }
 
-// A small on/off switch for the Notifications card. Preferences are only
-// kept in local state for now - there's no account settings store yet.
-function Toggle({ checked, onChange }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      aria-pressed={checked}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition ${
-        checked ? 'bg-teal-500' : 'bg-slate-300'
-      }`}
-    >
-      <span
-        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${
-          checked ? 'left-5' : 'left-0.5'
-        }`}
-      />
-    </button>
-  )
-}
-
 const emptyEditForm = { fullName: '', phoneNumber: '', location: '', department: '' }
 
 export default function Profile() {
@@ -124,11 +105,10 @@ export default function Profile() {
 
   const accountStats = [
     { label: 'Projects Managed', value: projects.length },
-    { label: 'Diagrams Reviewed', value: projects.reduce((sum, p) => sum + p.diagramsCount, 0) },
-    {
-      label: 'Requirements Approved',
-      value: projects.reduce((sum, p) => sum + p.approvedItems, 0),
-    },
+    { label: 'Diagrams Reviewed', value: projects.reduce((sum, p) => sum + getReviewedDiagramsCount(p), 0) },
+    // There's no Requirements feature yet to derive this from - stays a
+    // real, honest 0 rather than being wired to an unrelated number.
+    { label: 'Requirements Approved', value: 0 },
     { label: 'Team Members', value: uniqueTeamMembers },
   ]
 

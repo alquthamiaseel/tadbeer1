@@ -3,11 +3,14 @@ import Login from './pages/Login.jsx'
 import Register from './pages/Register.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Profile from './pages/Profile.jsx'
-import ProjectOverviewIndex from './pages/ProjectOverviewIndex.jsx'
 import ProjectOverview from './pages/ProjectOverview.jsx'
-import ComingSoon from './pages/ComingSoon.jsx'
+import ProjectDiagrams from './pages/ProjectDiagrams.jsx'
+import ProjectRequirements from './pages/ProjectRequirements.jsx'
+import ProjectTimeline from './pages/ProjectTimeline.jsx'
+import Settings from './pages/Settings.jsx'
 import Layout from './components/Layout.jsx'
 import ProtectedRoute from './components/ProtectedRoute.jsx'
+import ProjectScopedIndex from './components/ProjectScopedIndex.jsx'
 
 // ---------------------------------------------------------------------------
 // App
@@ -18,6 +21,13 @@ import ProtectedRoute from './components/ProtectedRoute.jsx'
 // 2. Private pages (Dashboard, Profile, ...) - wrapped in <Layout>, which
 //    adds the sidebar, and in <ProtectedRoute>, which redirects to /login
 //    if nobody is signed in.
+//
+// Project Overview, Diagrams, Requirements, and Timeline are all
+// project-scoped (/projects/:id/...), since none of them make sense
+// without a project to show. The flat sidebar links (/project-overview,
+// /diagrams, /requirements, /timeline) redirect to the most recently
+// created project's version of that page via ProjectScopedIndex.
+// Settings stays a single account-level page - it isn't project-scoped.
 // ---------------------------------------------------------------------------
 export default function App() {
   return (
@@ -36,15 +46,30 @@ export default function App() {
       >
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/profile" element={<Profile />} />
+        <Route path="/settings" element={<Settings />} />
 
-        <Route path="/project-overview" element={<ProjectOverviewIndex />} />
         <Route path="/projects/:id" element={<ProjectOverview />} />
+        <Route path="/projects/:id/diagrams" element={<ProjectDiagrams />} />
+        <Route path="/projects/:id/requirements" element={<ProjectRequirements />} />
+        <Route path="/projects/:id/timeline" element={<ProjectTimeline />} />
 
-        {/* Sidebar links that don't have real pages yet */}
-        <Route path="/requirements" element={<ComingSoon title="Requirements" />} />
-        <Route path="/diagrams" element={<ComingSoon title="Diagrams" />} />
-        <Route path="/timeline" element={<ComingSoon title="Timeline" />} />
-        <Route path="/settings" element={<ComingSoon title="Settings" />} />
+        {/* Sidebar links - jump to the most recent project's version of each page */}
+        <Route
+          path="/project-overview"
+          element={<ProjectScopedIndex title="Project Overview" />}
+        />
+        <Route
+          path="/diagrams"
+          element={<ProjectScopedIndex title="System Diagrams" pathSuffix="/diagrams" />}
+        />
+        <Route
+          path="/requirements"
+          element={<ProjectScopedIndex title="Requirements" pathSuffix="/requirements" />}
+        />
+        <Route
+          path="/timeline"
+          element={<ProjectScopedIndex title="Project Timeline" pathSuffix="/timeline" />}
+        />
       </Route>
 
       {/* Any unknown path redirects to the login page */}

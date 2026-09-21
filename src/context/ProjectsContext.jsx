@@ -17,18 +17,6 @@ const STORAGE_KEY = 'tadbeer_projects'
 
 export const PROJECT_PHASES = ['Planning', 'Requirements', 'Design', 'Development', 'Review']
 
-// There is no real Asana integration - this stands in for "pull the
-// project's members from Asana" so a newly created project shows up with
-// a believable, non-empty team instead of just the person who made it.
-const ASANA_TEAM_POOL = [
-  { name: 'Sara Hassan', role: 'UI/UX Designer' },
-  { name: 'Mohammed Ali', role: 'Backend Engineer' },
-  { name: 'Fatima Khan', role: 'QA Engineer' },
-  { name: 'Omar Siddiqui', role: 'Frontend Engineer' },
-  { name: 'Layla Ahmed', role: 'Business Analyst' },
-  { name: 'Yousef Nasser', role: 'DevOps Engineer' },
-]
-
 function getInitials(fullName) {
   if (!fullName) return '?'
   return fullName
@@ -37,16 +25,6 @@ function getInitials(fullName) {
     .slice(0, 2)
     .map((part) => part[0].toUpperCase())
     .join('')
-}
-
-// Picks 2-4 random, non-repeating members from the mock Asana pool.
-function pullTeamFromAsana() {
-  const shuffled = [...ASANA_TEAM_POOL].sort(() => Math.random() - 0.5)
-  const count = 2 + Math.floor(Math.random() * 3) // 2, 3, or 4
-  return shuffled.slice(0, count).map((member) => ({
-    ...member,
-    initials: getInitials(member.name),
-  }))
 }
 
 export function ProjectsProvider({ children }) {
@@ -61,12 +39,40 @@ export function ProjectsProvider({ children }) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(projects))
   }, [projects])
 
-  // Builds a full project record from just the 3 wizard steps' inputs -
-  // the phase timeline, mock Asana team, and activity metrics all start
-  // from a believable "just created" state rather than fake numbers.
+  // Every real, user-caused thing that happens to a project is logged here
+  // - this is what the Timeline page reads. Only things that actually
+  // happened get logged (a typed-in integration field), never a claim
+  // that something is "connected" or "monitoring", since neither is true
+  // without a real backend.
+  function logActivity(type, title, description) {
+    return { id: crypto.randomUUID(), type, title, description, createdAt: new Date().toISOString() }
+  }
+
+  // Builds a full project record from just the 3 wizard steps' inputs.
+  // There's no real Asana integration yet, so `team` only ever holds the
+  // person who actually created the project - it must never be filled
+  // with invented names. Once a real Asana connection exists, this is
+  // where its members would be fetched in and added.
+  //
+  // `diagrams` starts empty and stays empty until there's a real AI agent
+  // producing them - nothing in this app ever seeds it with invented
+  // diagrams. Total/approved/pending diagram counts are always derived
+  // from this array (see utils/projectStats.js), never stored separately,
+  // so there's only one source of truth for "how many diagrams exist".
   function addProject({ name, description, methodology, integrations }) {
     const now = new Date().toISOString()
     const owner = { name: user?.fullName || 'Unknown', role: 'Project Manager', initials: getInitials(user?.fullName) }
+
+    const activity = [logActivity('created', 'Project Created', `${name} was initialized`)]
+    if (integrations.slack) {
+      activity.push(logActivity('slack', 'Slack Channel Added', `${integrations.slack} was added to the project`))
+    }
+    if (integrations.asana) {
+      activity.push(logActivity('asana', 'Asana Project Linked', `${integrations.asana} was linked to the project`))
+    }
+    if (integrations.github) {
+      activity.push(logActivity('github', 'GitHub Repository Linked', `${integrations.github} was linked to the project`))
+    }
 
     const project = {
       id: crypto.randomUUID(),
@@ -75,11 +81,10 @@ export function ProjectsProvider({ children }) {
       methodology,
       integrations,
       currentPhaseIndex: 0, // index into PROJECT_PHASES - starts at "Planning"
-      currentPhaseProgress: 15,
-      team: [owner, ...pullTeamFromAsana()],
-      diagramsCount: 0,
-      approvedItems: 0,
-      pendingReview: 0,
+      currentPhaseProgress: 0, // nothing has happened yet - no work to show progress on
+      team: [owner],
+      diagrams: [],
+      activity,
       createdAt: now,
       updatedAt: now,
     }
@@ -92,10 +97,17 @@ export function ProjectsProvider({ children }) {
     return projects.find((project) => project.id === id)
   }
 
+  // Used by Settings' Danger Zone. Irreversible, so the confirm prompt
+  // lives at the call site right before the button triggers this.
+  function deleteAllProjects() {
+    setProjects([])
+  }
+
   const value = {
     projects,
     addProject,
     getProject,
+    deleteAllProjects,
     isCreateModalOpen,
     openCreateModal: () => setIsCreateModalOpen(true),
     closeCreateModal: () => setIsCreateModalOpen(false),

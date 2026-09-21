@@ -2,13 +2,25 @@ import { useAuth } from '../context/AuthContext.jsx'
 import { useProjects } from '../context/ProjectsContext.jsx'
 import StatCard from '../components/StatCard.jsx'
 import ProjectCard from '../components/ProjectCard.jsx'
+import { getApprovedDiagramsCount, getPendingDiagramsCount } from '../utils/projectStats.js'
 import {
   FolderIcon,
   CheckCircleIcon,
   ClockIcon,
   GitBranchIcon,
   PlusIcon,
+  ChatIcon,
+  DocumentIcon,
 } from '../components/icons.jsx'
+
+// One icon per activity type, so the feed doesn't show the same chat
+// bubble for a GitHub link as it does for a Slack channel.
+const ACTIVITY_ICONS = {
+  created: PlusIcon,
+  slack: ChatIcon,
+  asana: DocumentIcon,
+  github: GitBranchIcon,
+}
 
 // Picks "morning" / "afternoon" / "evening" based on the current hour.
 function getTimeOfDayGreeting() {
@@ -50,25 +62,26 @@ export default function Dashboard() {
       label: 'Approved Items',
       icon: CheckCircleIcon,
       iconColorClass: 'bg-green-50 text-green-600',
-      value: projects.reduce((sum, project) => sum + project.approvedItems, 0),
+      value: projects.reduce((sum, project) => sum + getApprovedDiagramsCount(project), 0),
     },
     {
       label: 'Pending Review',
       icon: ClockIcon,
       iconColorClass: 'bg-amber-50 text-amber-600',
-      value: projects.reduce((sum, project) => sum + project.pendingReview, 0),
+      value: projects.reduce((sum, project) => sum + getPendingDiagramsCount(project), 0),
     },
     {
       label: 'Total Diagrams',
       icon: GitBranchIcon,
       iconColorClass: 'bg-purple-50 text-purple-600',
-      value: projects.reduce((sum, project) => sum + project.diagramsCount, 0),
+      value: projects.reduce((sum, project) => sum + project.diagrams.length, 0),
     },
   ]
 
-  // Newest project first, one "created" entry each - there's no other
-  // activity to report yet since diagrams/requirements aren't built.
-  const recentActivity = [...projects]
+  // Every project's real activity log, flattened and sorted newest first -
+  // not just "created" entries, but integrations added too.
+  const recentActivity = projects
+    .flatMap((project) => project.activity.map((entry) => ({ ...entry, projectName: project.name })))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .slice(0, 5)
 
@@ -120,17 +133,22 @@ export default function Dashboard() {
             <p className="text-sm text-slate-500">No recent activity yet.</p>
           ) : (
             <ul className="space-y-4">
-              {recentActivity.map((project) => (
-                <li key={project.id} className="flex items-start gap-3 text-sm">
-                  <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-600">
-                    <PlusIcon className="h-3.5 w-3.5" />
-                  </div>
-                  <p className="text-slate-700">
-                    <span className="font-medium text-slate-900">{project.name}</span> was
-                    created
-                  </p>
-                </li>
-              ))}
+              {recentActivity.map((entry) => {
+                const Icon = ACTIVITY_ICONS[entry.type] || PlusIcon
+                return (
+                  <li key={entry.id} className="flex items-start gap-3 text-sm">
+                    <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-600">
+                      <Icon className="h-3.5 w-3.5" />
+                    </div>
+                    <div>
+                      <p className="text-slate-700">
+                        <span className="font-medium text-slate-900">{entry.projectName}</span> —{' '}
+                        {entry.description}
+                      </p>
+                    </div>
+                  </li>
+                )
+              })}
             </ul>
           )}
         </div>
