@@ -1,9 +1,3 @@
-"""Password hashing and session tokens.
-
-Passwords must never be recoverable from what is stored, and a token must
-prove who signed in without being forgeable or usable forever.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -27,7 +21,6 @@ def test_the_wrong_password_does_not_verify():
 
 
 def test_the_same_password_hashes_differently_each_time():
-    """A random salt, so two users with the same password don't share a hash."""
     assert security.hash_password("shared") != security.hash_password("shared")
 
 

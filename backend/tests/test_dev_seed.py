@@ -1,10 +1,3 @@
-"""The dev-only endpoint scripts/seed.py uses to pre-load a conversation.
-
-Captured Slack messages live in the running process's memory now, so seeding
-them from a separate script has to go over HTTP into the running backend
-rather than into a database both processes share.
-"""
-
 from __future__ import annotations
 
 import httpx

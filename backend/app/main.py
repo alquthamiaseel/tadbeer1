@@ -1,12 +1,3 @@
-"""FastAPI application entrypoint.
-
-The Slack listener runs as a background task inside this same process (see
-``lifespan`` below) rather than as a separate process. That is what lets the
-dashboard and Slack share the in-memory run store: a run created from `/pm
-start` is the same Python object the dashboard's API reads, with no database
-in between.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +36,7 @@ async def lifespan(app: FastAPI):
 
     if slack_task is not None:
         slack_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):  # noqa: BLE001 - shutting down
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await slack_task
     log.info("pm-fyp backend stopping")
 

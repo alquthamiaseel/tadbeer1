@@ -1,21 +1,3 @@
-"""Replay a canned stakeholder conversation into the running backend.
-
-A demo should not depend on typing six messages into Slack correctly while
-someone watches. This posts the same conversation the pipeline would have
-captured to the backend's dev-seed endpoint, so ``/pm start`` in that channel
-has something to read — and so a rehearsal is repeatable rather than
-improvised.
-
-Messages now live in memory inside the running API process (see
-``app.orchestrator.store``), so this has to talk to that process over HTTP
-rather than writing to a database — the backend must already be running
-(``make api``).
-
-Usage:
-    python -m scripts.seed --channel C0123456789
-    python -m scripts.seed --channel C0123456789 --reset
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -26,10 +8,6 @@ import httpx
 
 from app.config import settings
 
-#: A conversation with the properties the pipeline needs to show its work:
-#: two stakeholders who disagree slightly, a real constraint, a deadline, and
-#: one feature explicitly ruled out — so `out_of_scope` has something in it and
-#: the extraction can be checked rather than admired.
 CONVERSATION: list[tuple[str, str]] = [
     (
         "priya",
@@ -89,8 +67,6 @@ async def seed(channel_id: str, *, reset: bool, base_url: str) -> int:
     messages = [
         {
             "channel_id": channel_id,
-            # Slack timestamps are "seconds.microseconds" strings and the
-            # transcript is ordered by them, so they must ascend.
             "ts": f"{1740000000 + index * 60}.000100",
             "user_id": f"USEED{index:02d}",
             "user_name": name,

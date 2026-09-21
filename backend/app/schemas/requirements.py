@@ -1,16 +1,3 @@
-"""The INGEST stage's output contract.
-
-This is the first artifact in the pipeline and every later stage reads it, so
-it is deliberately explicit: the model is asked for structured requirements
-rather than a summary, and for the things it *could not* determine as well as
-the things it could. `open_questions` and `assumptions` are what make the
-approval step in Slack meaningful — without them the PM has nothing to react to
-except prose that sounds confident whether or not it is.
-
-Field descriptions are part of the prompt: they are sent to the model as the
-schema, so they are written as instructions, not as documentation for us.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -53,8 +40,6 @@ class Constraint(BaseModel):
 
 
 class Requirements(BaseModel):
-    """Structured requirements extracted from a stakeholder conversation."""
-
     project_name: str = Field(
         description="A short, specific project name. Not a generic label like 'Web App'."
     )

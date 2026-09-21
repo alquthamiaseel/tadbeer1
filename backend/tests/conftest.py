@@ -1,10 +1,3 @@
-"""Test fixtures.
-
-Pipeline state is in-memory now (see app.orchestrator.store), so tests reset
-that store rather than spinning up a database — the engine's job is now
-correct state transitions on plain Python objects, not persistence.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -15,7 +8,6 @@ from app.orchestrator.state import SlackMessage
 
 @pytest.fixture(autouse=True)
 def _reset_store():
-    """Every test starts with an empty run/message registry."""
     store.reset()
     yield
     store.reset()
@@ -33,7 +25,6 @@ CONVERSATION = [
 
 @pytest.fixture
 def conversation() -> list[SlackMessage]:
-    """A realistic stakeholder conversation captured in a channel."""
     messages = [
         SlackMessage(
             channel_id="C123",

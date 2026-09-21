@@ -1,12 +1,3 @@
-"""Dev-only convenience: pre-load a canned conversation into the running process.
-
-Slack messages now live in memory inside this process (see
-``app.orchestrator.store``), so a separate script can no longer seed them by
-writing to a database the API will later read. This endpoint lets
-``scripts/seed.py`` inject a conversation into the *running* backend instead,
-so a live Slack demo can still be rehearsed without retyping messages.
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -16,9 +7,7 @@ from app.api.auth import require_dashboard_auth
 from app.orchestrator import store
 from app.orchestrator.state import SlackMessage
 
-router = APIRouter(
-    prefix="/api/dev", tags=["dev"], dependencies=[Depends(require_dashboard_auth)]
-)
+router = APIRouter(prefix="/api/dev", tags=["dev"], dependencies=[Depends(require_dashboard_auth)])
 
 
 class SeedMessageIn(BaseModel):

@@ -1,25 +1,3 @@
-"""End-to-end acceptance for Phase 1: a seeded conversation to an approved plan.
-
-This is both the test and the demo script. It drives a real run through the
-requirements and planning stages against the real Gemini API, then checks the
-two things that have to be true for Phase 1 to have done what it claims:
-
-1. Structured requirements were extracted from the seeded conversation.
-2. A project plan was produced from those requirements and is awaiting approval.
-
-It does not exercise WBS, DESIGN, or PROTOTYPE — those stages are not part of
-the Phase 1 demo (see ``app.orchestrator.stages``) and their external
-publishing steps (Asana, GitHub, Vercel) have been removed from this build.
-
-Runs the whole pipeline in this process: a run is runtime state (see
-``app.orchestrator.store``), so this script seeds its own conversation and
-drives the run itself rather than depending on a separately running backend.
-
-Usage:
-    python -m scripts.e2e --channel C0123456789        # seeded conversation
-    python -m scripts.e2e --run <uuid>                 # check a run from this process
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -62,7 +40,6 @@ def _seed_conversation(channel_id: str) -> None:
 
 
 async def drive(channel_id: str) -> uuid.UUID:
-    """Run INGEST then PLAN, stopping at the plan approval gate."""
     _seed_conversation(channel_id)
     run = await engine.create_run(
         title="Phase 1 acceptance", slack_channel_id=channel_id, started_by="e2e"

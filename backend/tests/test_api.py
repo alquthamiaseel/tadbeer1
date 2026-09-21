@@ -1,10 +1,3 @@
-"""The dashboard's API.
-
-Exercised through a real ASGI client against the real in-memory run store —
-what these tests check is the shape the dashboard consumes, and the store is
-now the thing that shape comes from.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -40,7 +33,7 @@ async def _make_run(*, title="Campus Event Booking") -> Run:
     run.audit.append(
         AuditRow(
             kind="llm",
-            target="gemini-3.6-flash",
+            target="gpt-4o-mini",
             ok=True,
             duration_ms=9900,
             input_tokens=185,
@@ -74,7 +67,7 @@ async def test_the_audit_endpoint_returns_the_evidence_trail(api):
     rows = (await api.get(f"/api/runs/{run.id}/audit")).json()
 
     assert len(rows) == 1
-    assert rows[0]["target"] == "gemini-3.6-flash"
+    assert rows[0]["target"] == "gpt-4o-mini"
     assert rows[0]["input_tokens"] == 185
 
 
@@ -106,7 +99,6 @@ async def test_rerunning_a_stage_the_run_does_not_have_is_rejected(api):
 
 
 async def test_the_event_stream_sends_state_then_ends_on_a_terminal_run(api):
-    """A finished run must close the stream rather than leave the browser waiting."""
     run = await _make_run()
     run.status = RunStatus.COMPLETE
     for stage in run.stages:
@@ -127,13 +119,6 @@ async def test_the_event_stream_sends_state_then_ends_on_a_terminal_run(api):
 
 
 async def test_the_stream_emits_a_frame_when_a_stage_changes(monkeypatch):
-    """Driven through the response generator rather than an HTTP client.
-
-    httpx's ASGITransport collects a response before handing it back, so an
-    incremental stream is invisible through it — the frames only arrive once the
-    generator has finished. The generator is the thing under test here, so it is
-    iterated directly.
-    """
     from app.api import routes
 
     monkeypatch.setattr(routes, "POLL_SECONDS", 0.02)
@@ -152,9 +137,6 @@ async def test_the_stream_emits_a_frame_when_a_stage_changes(monkeypatch):
     assert second["stages"][0]["status"] == "RUNNING"
     assert second["status"] == "RUNNING"
     await response.body_iterator.aclose()
-
-
-# --- optional per-user auth --------------------------------------------------
 
 
 async def test_the_api_is_open_when_auth_is_off(api):
@@ -179,7 +161,6 @@ async def test_auth_rejects_a_missing_or_invalid_token(api, monkeypatch):
 
 
 async def test_auth_on_with_the_default_secret_fails_loudly(api, monkeypatch):
-    """Silently accepting the default secret on a public domain would be the worst outcome."""
     monkeypatch.setattr(settings, "dashboard_auth", True)
     monkeypatch.setattr(settings, "session_secret", "changeme-session-secret")
 

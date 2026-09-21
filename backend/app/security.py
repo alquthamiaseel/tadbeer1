@@ -1,11 +1,3 @@
-"""Password hashing and session tokens.
-
-Stdlib only, deliberately: PBKDF2-HMAC-SHA256 for password storage and an
-HMAC-signed, expiring token for sessions. This is not the last word in web
-auth, but for a single-instance dashboard behind an optional shared gate it is
-plenty, and it avoids pulling in a hashing library for a graduation project.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -19,7 +11,6 @@ from app.config import settings
 
 _PBKDF2_ITERATIONS = 390_000
 _SALT_BYTES = 16
-#: How long a signed-in session lasts before the cookie needs a fresh login.
 TOKEN_LIFETIME_SECONDS = 60 * 60 * 12
 
 
@@ -44,12 +35,6 @@ def _signature(payload: str) -> str:
 
 
 def create_token(user_id: uuid.UUID, username: str) -> str:
-    """An opaque, tamper-evident session token: ``user_id.username.expiry.signature``.
-
-    Safe to hand to a browser as a cookie value: it proves *who signed in and
-    until when*, not the password, and cannot be edited without invalidating
-    the signature.
-    """
     expiry = int(time.time()) + TOKEN_LIFETIME_SECONDS
     username_b64 = base64.urlsafe_b64encode(username.encode()).decode().rstrip("=")
     payload = f"{user_id}.{username_b64}.{expiry}"
@@ -57,7 +42,6 @@ def create_token(user_id: uuid.UUID, username: str) -> str:
 
 
 def verify_token(token: str) -> dict | None:
-    """The token's claims if it is validly signed and not expired, else None."""
     parts = token.split(".")
     if len(parts) != 4:
         return None

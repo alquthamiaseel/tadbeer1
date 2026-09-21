@@ -1,5 +1,3 @@
-"""The human-reviewable project plan produced after requirements ingestion."""
-
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -28,8 +26,6 @@ class Risk(BaseModel):
 
 
 class ProjectPlan(BaseModel):
-    """A deliberately concise plan that a project manager can approve in Slack."""
-
     executive_summary: str = Field(
         description="Clear two-to-four sentence summary of the project and intended outcome"
     )

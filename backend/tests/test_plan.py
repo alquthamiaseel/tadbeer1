@@ -1,5 +1,3 @@
-"""PLAN stage contract: requirements in, reviewable plan artifact out."""
-
 from __future__ import annotations
 
 import pytest
@@ -102,9 +100,7 @@ async def test_plan_uses_the_requirements_artifact(fake_llm):
 async def test_feedback_is_given_to_the_revision(fake_llm):
     run = await _ready_run()
 
-    await PlanStage().run(
-        StageContext(run=run, feedback="Include a pilot before delivery")
-    )
+    await PlanStage().run(StageContext(run=run, feedback="Include a pilot before delivery"))
 
     assert "Include a pilot before delivery" in fake_llm["user"]
     assert "rejected the previous plan" in fake_llm["user"]

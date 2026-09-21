@@ -1,16 +1,3 @@
-"""REST API consumed by the dashboard.
-
-The dashboard is read-only over pipeline state, with one exception: re-running a
-stage. Approvals stay in Slack, because the approval conversation is the point —
-a decision made in the dashboard would leave no trace where the stakeholders are
-talking.
-
-Progress is streamed rather than polled by the browser. The stream itself polls
-the in-memory run once a second — runs are minutes long and low-volume, and a
-pub/sub broker would be a second service to install and keep alive for a signal
-this small.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,10 +18,7 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["runs"], dependencies=[Depends(require_dashboard_auth)])
 
-#: How often the event stream re-reads the run. A stage takes tens of seconds,
-#: so this is far finer-grained than the thing it is watching.
 POLL_SECONDS = 1.0
-#: Comment frames keep proxies from closing an idle stream.
 HEARTBEAT_SECONDS = 15.0
 
 TERMINAL_RUN_STATUSES = {RunStatus.COMPLETE, RunStatus.FAILED, RunStatus.CANCELLED}
@@ -81,9 +65,6 @@ class RunSummaryOut(BaseModel):
     status: str
     current_stage: str | None
     created_at: str
-    asana_project_url: str | None
-    github_repo_url: str | None
-    vercel_url: str | None
 
 
 class RunDetailOut(RunSummaryOut):
@@ -106,9 +87,6 @@ def _summary(run: Run) -> RunSummaryOut:
         status=run.status.value,
         current_stage=run.current_stage.value if run.current_stage else None,
         created_at=run.created_at.isoformat(),
-        asana_project_url=run.asana_project_url,
-        github_repo_url=run.github_repo_url,
-        vercel_url=run.vercel_url,
     )
 
 
@@ -186,7 +164,6 @@ async def get_run(run_id: uuid.UUID) -> RunDetailOut:
 
 @router.get("/runs/{run_id}/audit", response_model=list[AuditOut])
 async def get_audit(run_id: uuid.UUID) -> list[AuditOut]:
-    """Every model and external API call this run made."""
     run = _load(run_id)
     return [_audit_out(row) for row in sorted(run.audit, key=lambda r: r.created_at)]
 
@@ -211,11 +188,6 @@ async def get_stage(stage_id: uuid.UUID) -> StageOut:
 
 @router.post("/runs/{run_id}/rerun", response_model=RunDetailOut)
 async def rerun(run_id: uuid.UUID, body: RerunIn) -> RunDetailOut:
-    """Reset a stage and everything after it, then run forward in the background.
-
-    Returns immediately with the reset state. A run takes minutes; holding the
-    HTTP request open for it would only invite a proxy to time it out.
-    """
     run = _load(run_id)
     if not any(stage.kind == body.stage for stage in run.stages):
         raise HTTPException(status_code=400, detail=f"{body.stage} is not a stage of this run")
@@ -227,19 +199,15 @@ async def rerun(run_id: uuid.UUID, body: RerunIn) -> RunDetailOut:
 async def _rerun_in_background(run_id: uuid.UUID, stage: StageKind, feedback: str | None) -> None:
     try:
         await engine.rerun_stage(run_id, stage, feedback=feedback)
-    except Exception:  # noqa: BLE001 - a background task must not die silently
+    except Exception:
         log.exception("background re-run of %s on run %s failed", stage, run_id)
 
 
 def _signature(run: Run) -> tuple:
-    """What has to change for the dashboard to need a new frame."""
     return (
         run.status,
         run.current_stage,
         run.error,
-        run.asana_project_url,
-        run.github_repo_url,
-        run.vercel_url,
         len(run.artifacts),
         tuple(sorted((s.kind, s.status, s.attempt, s.error) for s in run.stages)),
     )
@@ -247,7 +215,6 @@ def _signature(run: Run) -> tuple:
 
 @router.get("/runs/{run_id}/events")
 async def stream_events(run_id: uuid.UUID) -> StreamingResponse:
-    """Server-sent events: one frame per actual change, then done."""
 
     async def frames() -> AsyncIterator[str]:
         previous: tuple | None = None
@@ -274,7 +241,7 @@ async def stream_events(run_id: uuid.UUID) -> StreamingResponse:
                 if since_heartbeat >= HEARTBEAT_SECONDS:
                     since_heartbeat = 0.0
                     yield ": heartbeat\n\n"
-        except asyncio.CancelledError:  # the browser navigated away
+        except asyncio.CancelledError:
             raise
 
     return StreamingResponse(
@@ -283,7 +250,6 @@ async def stream_events(run_id: uuid.UUID) -> StreamingResponse:
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            # Nginx and friends buffer streamed responses into uselessness.
             "X-Accel-Buffering": "no",
         },
     )

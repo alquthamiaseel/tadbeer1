@@ -1,14 +1,3 @@
-"""Verify every credential Phase 1 needs before anything else runs.
-
-    make check
-
-Phase 1 runs only INGEST and PLAN (see STAGE_ORDER in app.orchestrator.state),
-so this checks only what those need: Gemini, Slack, and the dashboard-login
-database. Asana/GitHub/Vercel publishing has been removed from this build —
-those stages still exist in the codebase for a later phase, but nothing here
-checks credentials for services this build does not call.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -46,16 +35,10 @@ def missing(service: str, var: str) -> Result:
     return Result(service, FAIL, f"{var} is not set", f"Add {var} to .env (see .env.example)")
 
 
-# --------------------------------------------------------------------------
-# Gemini
-#
-# A real generation, not just an auth ping: on the free tier the failure that
-# actually bites is a quota rejection, and only a generation surfaces that.
-# --------------------------------------------------------------------------
-async def check_gemini() -> Result:
-    if not settings.gemini_api_key:
-        return missing("Gemini", "GEMINI_API_KEY")._with_hint(
-            "Get a free key at https://aistudio.google.com/apikey"
+async def check_llm() -> Result:
+    if not settings.openai_api_key:
+        return missing("OpenAI", "OPENAI_API_KEY")._with_hint(
+            "Create a key at https://platform.openai.com/api-keys"
         )
     try:
         from pydantic import BaseModel
@@ -69,30 +52,25 @@ async def check_gemini() -> Result:
             output_model=Ping,
             system="You verify connectivity. Answer exactly as instructed.",
             user="Set ok to true.",
-            max_output_tokens=2_000,
-            effort="low",
+            max_output_tokens=200,
             repair_attempts=0,
         )
         return Result(
-            "Gemini",
+            "OpenAI",
             PASS,
             f"{settings.llm_model} responded "
             f"({result.input_tokens} in / {result.output_tokens} out tokens)",
         )
-    except Exception as exc:  # noqa: BLE001 - the point is to report any failure
+    except Exception as exc:
         return Result(
-            "Gemini",
+            "OpenAI",
             FAIL,
             _short(exc),
-            f"Check GEMINI_API_KEY and that LLM_MODEL={settings.llm_model} exists on the "
-            "free tier — see https://aistudio.google.com/rate-limit",
+            f"Check OPENAI_API_KEY, your billing, and that LLM_MODEL={settings.llm_model} "
+            "is a model your account can use",
         )
 
 
-# --------------------------------------------------------------------------
-# Slack — both tokens matter: the bot token posts, the app token opens the
-# Socket Mode connection. A run fails at startup if either is wrong.
-# --------------------------------------------------------------------------
 async def check_slack() -> list[Result]:
     results: list[Result] = []
 
@@ -124,7 +102,7 @@ async def check_slack() -> list[Result]:
                         "(OAuth & Permissions -> Bot User OAuth Token)",
                     )
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             results.append(Result("Slack bot", FAIL, _short(exc)))
 
     if not settings.slack_app_token:
@@ -149,36 +127,30 @@ async def check_slack() -> list[Result]:
                         "connections:write scope (Basic Information -> App-Level Tokens)",
                     )
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             results.append(Result("Slack app", FAIL, _short(exc)))
 
     return results
 
 
-# --------------------------------------------------------------------------
-# Database
-# --------------------------------------------------------------------------
-async def check_database() -> Result:
+async def check_users_file() -> Result:
     try:
-        from sqlalchemy import text
+        from app import users_store
 
-        from app.db import engine
+        path = users_store.users_path()
+        if not path.exists():
+            return Result(
+                "Users file",
+                WARN,
+                f"{path} does not exist yet",
+                "Run `python -m scripts.create_user --username alice --password ...`",
+            )
+        count = len(users_store._read())
+        return Result("Users file", PASS, f"{path} ({count} user(s))")
+    except Exception as exc:
+        return Result("Users file", FAIL, _short(exc), "Check that the file is valid JSON")
 
-        async with engine.connect() as conn:
-            await conn.execute(text("select 1"))
-        return Result("Database", PASS, settings.database_url.split("@")[-1])
-    except Exception as exc:  # noqa: BLE001
-        return Result(
-            "Database",
-            FAIL,
-            _short(exc),
-            "Run `make db` to start Postgres",
-        )
 
-
-# --------------------------------------------------------------------------
-# Presentation
-# --------------------------------------------------------------------------
 def _short(exc: Exception, limit: int = 120) -> str:
     text = " ".join(str(exc).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -210,15 +182,15 @@ def render(results: list[Result]) -> None:
 
 
 async def main() -> int:
-    print("\n  pm-fyp credential check (Phase 1: Gemini, Slack, database)")
+    print("\n  pm-fyp credential check (Phase 1: OpenAI, Slack, users file)")
 
-    gemini_result, slack_results, db_result = await asyncio.gather(
-        check_gemini(),
+    llm_result, slack_results, db_result = await asyncio.gather(
+        check_llm(),
         check_slack(),
-        check_database(),
+        check_users_file(),
     )
 
-    results = [gemini_result, *slack_results, db_result]
+    results = [llm_result, *slack_results, db_result]
     render(results)
     return 1 if any(r.status == FAIL for r in results) else 0
 

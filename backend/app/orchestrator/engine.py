@@ -1,19 +1,3 @@
-"""The pipeline engine.
-
-Walks a run through the six stages in order. The engine owns everything that is
-the same for every stage — timing, status transitions, retries, approval
-gates — so a stage only has to produce its artifact.
-
-State lives in memory, in the ``store`` module, for the lifetime of the run:
-
-* **Resumable within the process.** :func:`advance` starts from the first
-  stage that is not complete, so calling it again after a transient failure
-  costs only the current stage.
-* **Re-runnable.** Any single stage can be reset and run again with feedback,
-  because its inputs are artifacts already attached to the run, not values held
-  by a caller.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -24,12 +8,8 @@ from datetime import UTC, datetime
 from app import audit
 from app.orchestrator import store
 from app.orchestrator.base import StageContext, StageFailed, StageResult
-from app.orchestrator.stages.design import DesignStage
-from app.orchestrator.stages.done import DoneStage
 from app.orchestrator.stages.ingest import IngestStage
 from app.orchestrator.stages.plan import PlanStage
-from app.orchestrator.stages.prototype import PrototypeStage
-from app.orchestrator.stages.wbs import WbsStage
 from app.orchestrator.state import (
     STAGE_ORDER,
     Artifact,
@@ -43,21 +23,11 @@ from app.orchestrator.state import (
 
 log = logging.getLogger(__name__)
 
-#: Which stages pause for a human decision in Slack before the pipeline goes on.
-#: PLAN is the one that always matters: everything downstream is derived from it,
-#: so it is the cheapest possible place to catch a misunderstanding.
 APPROVAL_GATES: set[StageKind] = {StageKind.PLAN}
 
-#: Every stage, in no particular order — STAGE_ORDER decides execution. The
-#: engine stops cleanly at a kind that is absent here rather than failing, which
-#: is what let the pipeline be built up one stage at a time.
 REGISTRY: dict[StageKind, object] = {
     StageKind.INGEST: IngestStage(),
     StageKind.PLAN: PlanStage(),
-    StageKind.WBS: WbsStage(),
-    StageKind.DESIGN: DesignStage(),
-    StageKind.PROTOTYPE: PrototypeStage(),
-    StageKind.DONE: DoneStage(),
 }
 
 
@@ -72,7 +42,6 @@ async def create_run(
     slack_thread_ts: str | None = None,
     started_by: str | None = None,
 ) -> Run:
-    """Create a run with all six stages pending."""
     run = Run(
         title=title,
         status=RunStatus.PENDING,
@@ -87,12 +56,10 @@ async def create_run(
 
 
 async def load_run(run_id: uuid.UUID) -> Run | None:
-    """The run as it stands right now. There is nothing to reload from."""
     return store.get(run_id)
 
 
 def next_stage(run: Run) -> Stage | None:
-    """The first stage that still needs to run, or None if the run is finished."""
     for stage in sorted(run.stages, key=lambda s: s.position):
         if stage.status in (StageStatus.COMPLETE, StageStatus.SKIPPED):
             continue
@@ -100,9 +67,6 @@ def next_stage(run: Run) -> Stage | None:
     return None
 
 
-#: Called after each stage settles, with the run and the stage that just ran.
-#: Exists so Slack can report progress during a run that takes minutes; the
-#: engine stays unaware of Slack, and a caller that does not care passes None.
 StageObserver = Callable[[Run, Stage], Awaitable[None]]
 
 
@@ -112,11 +76,6 @@ async def advance(
     feedback: str | None = None,
     on_stage: StageObserver | None = None,
 ) -> Run:
-    """Run stages until the pipeline finishes, needs a human, or fails.
-
-    Safe to call repeatedly: it always resumes from the first incomplete stage,
-    so the same call both starts a fresh run and continues an interrupted one.
-    """
     run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")
@@ -137,8 +96,6 @@ async def advance(
 
         implementation = REGISTRY.get(stage.kind)
         if implementation is None:
-            # Not an error: stages are added over the course of the build, and
-            # stopping here beats failing a run that got as far as it could.
             log.info("run %s reached unimplemented stage %s; stopping", run.id, stage.kind)
             run.status = RunStatus.RUNNING
             run.current_stage = stage.kind
@@ -146,12 +103,12 @@ async def advance(
             return run
 
         ok = await _run_stage(run, stage, implementation, feedback)
-        feedback = None  # applies to the stage it was given for, not the ones after
+        feedback = None
 
         if on_stage is not None:
             try:
                 await on_stage(run, stage)
-            except Exception:  # noqa: BLE001 - reporting must not fail the run
+            except Exception:
                 log.exception("stage observer raised for %s on run %s", stage.kind, run.id)
 
         if not ok:
@@ -161,7 +118,6 @@ async def advance(
 
 
 async def _run_stage(run: Run, stage: Stage, implementation, feedback: str | None) -> bool:
-    """Execute one stage and record everything it produced. True if it advanced."""
     stage.status = StageStatus.RUNNING
     stage.attempt += 1
     stage.started_at = _now()
@@ -172,17 +128,12 @@ async def _run_stage(run: Run, stage: Stage, implementation, feedback: str | Non
 
     log.info("run %s stage %s starting (attempt %d)", run.id, stage.kind, stage.attempt)
 
-    # Everything the stage calls records into this collector, whether or not it
-    # knows the engine exists. Recorded below even when the stage fails — a
-    # failed stage is exactly when the call log is worth having.
     with audit.collecting() as calls:
         try:
-            result: StageResult = await implementation.run(
-                StageContext(run=run, feedback=feedback)
-            )
+            result: StageResult = await implementation.run(StageContext(run=run, feedback=feedback))
         except StageFailed as exc:
             return _fail(run, stage, str(exc), calls)
-        except Exception as exc:  # noqa: BLE001 - failures must be visible, not just logged
+        except Exception as exc:
             log.exception("run %s stage %s raised", run.id, stage.kind)
             return _fail(run, stage, f"{type(exc).__name__}: {exc}", calls)
 
@@ -194,8 +145,6 @@ async def _run_stage(run: Run, stage: Stage, implementation, feedback: str | Non
             Artifact(
                 kind=produced.kind,
                 name=produced.name,
-                # Re-running a stage adds a version rather than overwriting, so
-                # the history of what changed after feedback survives.
                 version=max((a.version for a in existing), default=0) + 1,
                 data=produced.data,
                 text=produced.text,
@@ -227,7 +176,6 @@ async def _run_stage(run: Run, stage: Stage, implementation, feedback: str | Non
 
 
 def _record_audit(run: Run, stage: Stage, calls: audit.Collector) -> None:
-    """Append one AuditRow per call the stage made."""
     for entry in calls.entries:
         run.audit.append(
             AuditRow(
@@ -245,10 +193,6 @@ def _record_audit(run: Run, stage: Stage, calls: audit.Collector) -> None:
 
 def _fail(run: Run, stage: Stage, message: str, calls: audit.Collector) -> bool:
     _record_audit(run, stage, calls)
-    # A stage that failed on its third model call still spent the first two. The
-    # collector is the only record of that, because the stage never got to
-    # return a result — leaving these at zero would understate real usage
-    # exactly where someone is looking to find out what went wrong.
     stage.input_tokens += calls.input_tokens
     stage.output_tokens += calls.output_tokens
     stage.status = StageStatus.FAILED
@@ -262,12 +206,6 @@ def _fail(run: Run, stage: Stage, message: str, calls: audit.Collector) -> bool:
 
 
 async def mark_stage_approved(run_id: uuid.UUID, stage_kind: StageKind) -> Run:
-    """Record that a human approved a gated stage, without running anything.
-
-    Separate from :func:`approve` because the caller that has a human waiting —
-    a Slack button — wants to answer immediately and let the rest of the
-    pipeline continue in the background.
-    """
     run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")
@@ -286,7 +224,6 @@ async def approve(
     *,
     on_stage: StageObserver | None = None,
 ) -> Run:
-    """Mark a gated stage approved and carry on."""
     await mark_stage_approved(run_id, stage_kind)
     return await advance(run_id, on_stage=on_stage)
 
@@ -298,7 +235,6 @@ async def request_changes(
     *,
     on_stage: StageObserver | None = None,
 ) -> Run:
-    """Send a gated stage back to be redone with the reviewer's feedback."""
     run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")
@@ -318,12 +254,6 @@ async def rerun_stage(
     feedback: str | None = None,
     on_stage: StageObserver | None = None,
 ) -> Run:
-    """Reset a stage and everything after it, then run forward from there.
-
-    Later stages are reset too because they were derived from output that is
-    about to change; leaving them complete would leave the run internally
-    inconsistent.
-    """
     run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")

@@ -1,5 +1,3 @@
-"""PLAN — turn validated requirements into a human-reviewable delivery plan."""
-
 from __future__ import annotations
 
 import json

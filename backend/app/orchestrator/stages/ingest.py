@@ -1,5 +1,3 @@
-"""INGEST — turn a Slack conversation into structured requirements."""
-
 from __future__ import annotations
 
 from app.llm.client import generate_structured
@@ -8,7 +6,6 @@ from app.orchestrator.base import ProducedArtifact, StageContext, StageFailed, S
 from app.orchestrator.state import ArtifactKind, SlackMessage, StageKind
 from app.schemas.requirements import Requirements
 
-#: Below this, there is no conversation to speak of — see the check in run().
 MIN_CONVERSATION_CHARS = 40
 
 SYSTEM = """\
@@ -49,11 +46,6 @@ Produce a corrected extraction that addresses this feedback.
 
 
 def format_conversation(messages: list[SlackMessage]) -> str:
-    """Render captured messages as a transcript.
-
-    Speaker names matter: the model reasons better about who wants what when
-    the transcript reads like people talking rather than a list of strings.
-    """
     lines = []
     for message in messages:
         who = message.user_name or message.user_id or "unknown"
@@ -77,12 +69,6 @@ class IngestStage:
             )
 
         conversation = format_conversation(messages)
-        # Deliberately a low floor. This is here to catch an empty or accidental
-        # channel ("hi", "test"), not to judge whether a brief is detailed
-        # enough — a terse but real brief is legitimate, and the schema already
-        # forces the model to report what it had to assume and what it still
-        # needs to ask. Those surface at the approval gate, which is the right
-        # place for a human to notice the input was thin.
         if len(conversation) < MIN_CONVERSATION_CHARS:
             raise StageFailed(
                 f"There is barely any conversation here ({len(conversation)} characters). "
@@ -124,12 +110,6 @@ class IngestStage:
         )
 
     async def _load_messages(self, ctx: StageContext) -> list[SlackMessage]:
-        """Messages belonging to this run's conversation, oldest first.
-
-        Matched on channel plus thread rather than on the run itself, because
-        messages are captured as they arrive and only claimed by a run
-        afterwards.
-        """
         if not ctx.run.slack_channel_id:
             return []
         messages = store.messages_for(ctx.run.slack_channel_id, ctx.run.slack_thread_ts)

@@ -1,24 +1,3 @@
-"""Slack integration.
-
-Slack is the conversation hub: it is where requirements arrive, where the agent
-reports, and where a human approves or rejects what it produced. This module is
-the boundary — it captures messages, handles `/pm`, and posts results. It holds
-no pipeline logic of its own; that lives in the orchestrator.
-
-Socket Mode, not webhooks. The app opens an outbound WebSocket to Slack, so
-there is no public URL, no tunnel to configure, and nothing to expire in the
-middle of a demo.
-
-Two properties this module has to get right:
-
-* **Capture is idempotent.** Slack redelivers events, so the same message can
-  arrive twice. Messages are keyed on (channel, ts) and a duplicate is dropped
-  rather than doubling up in the transcript.
-* **Handlers acknowledge fast.** Slack times out a slash command in 3 seconds,
-  but a pipeline run takes minutes, so commands acknowledge immediately and the
-  run continues in the background.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -36,8 +15,6 @@ from app.orchestrator.state import ArtifactKind, Run, SlackMessage, StageKind, S
 
 log = logging.getLogger(__name__)
 
-#: Message subtypes that are not conversation: joins, edits, deletions, and the
-#: bot's own posts. Capturing these would pollute the requirements transcript.
 IGNORED_SUBTYPES = {
     "bot_message",
     "message_changed",
@@ -51,7 +28,7 @@ IGNORED_SUBTYPES = {
 }
 
 HELP = (
-    "*PM Agent*\n"
+    "*Tadbeer*\n"
     "• `/pm start` — read this conversation and start planning\n"
     "• `/pm status` — where the current run has got to\n"
     "• `/pm help` — this message\n\n"
@@ -70,17 +47,10 @@ def build_app() -> AsyncApp:
 
 app = build_app() if settings.slack_bot_token and settings.slack_app_token else None
 
-#: user id -> display name. Resolved lazily; Slack rate-limits users.info and
-#: the same handful of people speak throughout a conversation.
 _NAME_CACHE: dict[str, str] = {}
 
 
 async def resolve_user_name(client, user_id: str | None) -> str | None:
-    """A human-readable name for a Slack user id.
-
-    Names matter to the pipeline: the transcript reads as people talking, which
-    is what lets the model work out who wants what.
-    """
     if not user_id:
         return None
     if user_id in _NAME_CACHE:
@@ -95,7 +65,6 @@ async def resolve_user_name(client, user_id: str | None) -> str | None:
             or user_id
         )
     except SlackApiError as exc:
-        # Not fatal: the user id still identifies the speaker.
         log.warning("could not resolve user %s: %s", user_id, exc)
         name = user_id
     _NAME_CACHE[user_id] = name
@@ -103,7 +72,6 @@ async def resolve_user_name(client, user_id: str | None) -> str | None:
 
 
 async def capture_message(event: dict, client) -> bool:
-    """Store one Slack message. Returns False if it was ignored or a duplicate."""
     if event.get("subtype") in IGNORED_SUBTYPES or event.get("bot_id"):
         return False
 
@@ -127,15 +95,10 @@ async def capture_message(event: dict, client) -> bool:
 
 
 class NotInChannel(RuntimeError):
-    """The bot is not a member of the channel, so it cannot post there."""
+    pass
 
 
 async def post(client, channel: str, text: str, thread_ts: str | None = None) -> None:
-    """Post to a channel.
-
-    Raises :class:`NotInChannel` rather than logging it, because that failure
-    has a fix the user can apply and they will never read the log.
-    """
     try:
         await client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
     except SlackApiError as exc:
@@ -148,7 +111,6 @@ async def post(client, channel: str, text: str, thread_ts: str | None = None) ->
 async def post_blocks(
     client, channel: str, text: str, blocks: list[dict], thread_ts: str | None = None
 ) -> dict:
-    """Post an interactive Block Kit message, preserving the membership diagnosis."""
     try:
         return await client.chat_postMessage(
             channel=channel, text=text, blocks=blocks, thread_ts=thread_ts
@@ -162,7 +124,7 @@ async def post_blocks(
 
 INVITE_ME = (
     ":wave: I am not in this channel yet, so I cannot read the conversation or reply in it.\n\n"
-    "Type `/invite @PM Agent` here, then run `/pm start` again."
+    "Type `/invite @tadbeer` here, then run `/pm start` again."
 )
 
 NOTHING_TO_READ = (
@@ -173,57 +135,39 @@ NOTHING_TO_READ = (
 
 
 def explain_failure(exc: Exception) -> str:
-    """Turn an exception into something the person in Slack can act on.
-
-    The infrastructure failures all look the same from Slack — a command that
-    never answers — so name the likely cause and the command that fixes it.
-    """
     text = str(exc)
 
-    if isinstance(exc, ConnectionRefusedError) or "Connect call failed" in text:
+    if "OPENAI_API_KEY" in text:
+        return ":x: No model API key is configured. Set `OPENAI_API_KEY` and restart me."
+    if "billing" in text.lower() or "quota" in text.lower() or "rate limit" in text.lower():
         return (
-            ":x: I cannot reach my database, so I could not start.\n"
-            "Run `make db` where the agent is running, then try again."
+            ":x: OpenAI quota or rate limit reached.\n"
+            "Check your billing at platform.openai.com. Wait a minute and try again."
         )
-    if "quota" in text.lower() or "RESOURCE_EXHAUSTED" in text:
-        return (
-            ":x: The model's free-tier quota is used up for now.\n"
-            "Wait a minute for the window to reset, then try again."
-        )
-    if "APIConnectionError" in text or "Server disconnected" in text:
+    if "network" in text.lower() or "Server disconnected" in text:
         return (
             ":x: I could not reach the model — the connection kept dropping.\n"
             "This is usually the network rather than the run. Try `/pm start` again."
         )
-    if "GEMINI_API_KEY" in text:
-        return ":x: No model API key is configured. Set `GEMINI_API_KEY` and restart me."
 
     return f":x: Something went wrong.\n```{type(exc).__name__}: {text[:400]}```"
 
 
 async def active_run(channel_id: str, thread_ts: str | None) -> Run | None:
-    """The most recent run for this conversation, if any."""
     return store.active_run(channel_id, thread_ts)
 
 
-#: What each stage is doing, posted as it finishes. A full run takes minutes,
-#: and silence in the channel is indistinguishable from a crash.
 STAGE_DONE = {
     StageKind.INGEST: ":mag: Read the conversation and extracted the requirements.",
     StageKind.PLAN: ":clipboard: Drafted the project plan.",
-    StageKind.WBS: ":card_index_dividers: Built the work breakdown and pushed it to Asana.",
-    StageKind.DESIGN: ":triangular_ruler: Produced the system design diagrams.",
-    StageKind.PROTOTYPE: ":rocket: Generated the prototype, committed it, and deployed it.",
-    StageKind.DONE: ":checkered_flag: Finished.",
 }
 
 
 def _progress_reporter(client, channel: str, thread_ts: str | None):
-    """An engine observer that narrates each completed stage into the channel."""
 
     async def report(run: Run, stage) -> None:
         if stage.status == StageStatus.FAILED:
-            return  # the failure itself is reported once, by the caller
+            return
         note = STAGE_DONE.get(stage.kind)
         if note and stage.status == StageStatus.COMPLETE:
             await post(client, channel, note, thread_ts)
@@ -234,7 +178,6 @@ def _progress_reporter(client, channel: str, thread_ts: str | None):
 async def _revise_plan(
     run_id: uuid.UUID, channel: str, thread_ts: str | None, feedback: str, client
 ) -> None:
-    """Re-run PLAN with the reviewer's feedback and post the revision for review."""
     try:
         run = await engine.request_changes(
             run_id,
@@ -246,7 +189,7 @@ async def _revise_plan(
             await post_plan_approval(client, channel, run, thread_ts)
             return
         message = describe(run)
-    except Exception as exc:  # noqa: BLE001 - the user must hear about any failure
+    except Exception as exc:
         log.exception("revising the plan for run %s failed", run_id)
         message = explain_failure(exc)
 
@@ -254,18 +197,13 @@ async def _revise_plan(
 
 
 async def run_pipeline(run_id: uuid.UUID, channel: str, thread_ts: str | None, client) -> None:
-    """Drive a run to its next stopping point, reporting progress in Slack.
-
-    Runs detached from the command handler, which has already acknowledged —
-    a pipeline takes minutes and Slack gives a slash command three seconds.
-    """
     try:
         run = await engine.advance(run_id, on_stage=_progress_reporter(client, channel, thread_ts))
         if _awaiting_plan_approval(run):
             await post_plan_approval(client, channel, run, thread_ts)
             return
         message = describe(run)
-    except Exception as exc:  # noqa: BLE001 - the user must hear about any failure
+    except Exception as exc:
         log.exception("run %s failed", run_id)
         message = explain_failure(exc)
 
@@ -288,7 +226,6 @@ def _latest_plan(run: Run) -> dict:
 
 
 def _plan_blocks(run: Run) -> list[dict]:
-    """A compact plan review that stays below Slack's Block Kit limits."""
     plan = _latest_plan(run)
     phases = plan.get("phases", [])
     risks = plan.get("risks", [])
@@ -353,7 +290,6 @@ async def post_plan_approval(client, channel: str, run: Run, thread_ts: str | No
 
 
 def describe(run: Run) -> str:
-    """A Slack-readable summary of where a run has got to."""
     done = [s for s in run.stages if s.status == StageStatus.COMPLETE]
     failed = next((s for s in run.stages if s.status == StageStatus.FAILED), None)
     waiting = next((s for s in run.stages if s.status == StageStatus.AWAITING_APPROVAL), None)
@@ -370,24 +306,13 @@ def describe(run: Run) -> str:
         )
 
     if run.status.value == "COMPLETE":
-        links = [
-            f"• <{url}|{label}>"
-            for label, url in (
-                ("Asana project", run.asana_project_url),
-                ("GitHub repo", run.github_repo_url),
-                ("Live prototype", run.vercel_url),
-            )
-            if url
-        ]
-        body = "\n".join(links) if links else "_No external artifacts were produced._"
-        return f"{header}\n:white_check_mark: Finished.\n{body}"
+        return f"{header}\n:white_check_mark: Finished."
 
     stage = run.current_stage or "?"
     return f"{header}\n:gear: Working on *{stage}* ({len(done)} of {len(run.stages)} done)."
 
 
 def register(app: AsyncApp) -> None:
-    """Attach every listener. Separate from module import so tests can drive it."""
 
     @app.event("message")
     async def on_message(event, client):
@@ -397,7 +322,6 @@ def register(app: AsyncApp) -> None:
 
     @app.event("app_mention")
     async def on_mention(event, client):
-        # A mention is still conversation, so capture it, then point at /pm.
         await capture_message(event, client)
         await post(
             client,
@@ -423,10 +347,8 @@ def register(app: AsyncApp) -> None:
             thread_ts = run.slack_thread_ts
             title = run.title
             await post(client, channel, f":white_check_mark: *{title}* plan approved by {user}.")
-            # The remaining four stages take minutes. Continue in the background
-            # so the button does not sit spinning while Asana and Vercel work.
             asyncio.create_task(run_pipeline(run_id, channel, thread_ts, client))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("plan approval failed")
             await post(client, channel, explain_failure(exc))
 
@@ -486,28 +408,18 @@ def register(app: AsyncApp) -> None:
                 thread_ts,
             )
             asyncio.create_task(_revise_plan(run_id, channel, thread_ts, feedback, client))
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("plan feedback submission failed")
-            # A modal has no durable response destination. A best-effort DM is
-            # overkill for v1; the error is logged and the run state is retained.
             raise
 
     @app.command("/pm")
     async def on_command(ack, command, client, respond):
-        # Acknowledge inside Slack's three-second window before doing anything.
         await ack()
 
         action = (command.get("text") or "").strip().split(" ")[0].lower() or "help"
         channel = command["channel_id"]
-        # A slash command is not itself in a thread, so runs started this way
-        # read the whole channel.
         thread_ts = None
 
-        # Every command reports its own failure into the channel. Without this,
-        # an exception here reaches the user as Slack's generic "the app did not
-        # respond", which is indistinguishable whether the cause is exhausted
-        # model quota or a bug — and says nothing about which. The listener must
-        # also survive: one bad command should not take the process down.
         try:
             if action == "start":
                 await _start(channel, thread_ts, command, client)
@@ -518,12 +430,9 @@ def register(app: AsyncApp) -> None:
             else:
                 await post(client, channel, HELP)
         except NotInChannel:
-            # Cannot post to the channel, so answer over the command's own
-            # response URL instead. This is the one failure that is otherwise
-            # completely silent — the user sees nothing at all.
             log.warning("not a member of %s; replying privately", channel)
             await respond(INVITE_ME)
-        except Exception as exc:  # noqa: BLE001 - the user must see what went wrong
+        except Exception as exc:
             log.exception("/pm %s failed", action)
             explanation = explain_failure(exc)
             try:
@@ -547,15 +456,9 @@ async def _start(channel: str, thread_ts: str | None, command: dict, client) -> 
     message_count = store.message_count(channel)
 
     if message_count == 0:
-        # The bot only receives messages from channels it is in, so an empty
-        # transcript almost always means it was never invited — say that here
-        # rather than letting INGEST fail with the same diagnosis a minute later.
         await post(client, channel, NOTHING_TO_READ, thread_ts)
         return
 
-    # Post before creating the run. If the bot is not in the channel this raises
-    # NotInChannel and the command handler explains the fix — creating the run
-    # first would leave a failed run behind for a problem that is not the run's.
     await post(
         client,
         channel,
@@ -570,7 +473,6 @@ async def _start(channel: str, thread_ts: str | None, command: dict, client) -> 
         started_by=command.get("user_name") or command.get("user_id"),
     )
 
-    # Detached: the command handler must return, the pipeline takes minutes.
     asyncio.create_task(run_pipeline(run.id, channel, thread_ts, client))
 
 
@@ -592,7 +494,6 @@ async def _cancel(channel: str, thread_ts: str | None, client) -> None:
 
 
 async def start_socket_mode() -> None:
-    """Open the Socket Mode connection and serve until cancelled."""
     if app is None:
         raise RuntimeError("Slack tokens are not configured; run `make check`.")
     register(app)

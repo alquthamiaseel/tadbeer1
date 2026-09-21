@@ -1,11 +1,3 @@
-"""The pipeline engine.
-
-The engine's contract is that run state is always recoverable from the run
-object itself. These tests exercise that directly: a stage that fails must
-leave a readable error, a re-run must not silently discard the previous
-artifact, and resuming must not redo completed work.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -16,8 +8,6 @@ from app.orchestrator.state import ArtifactKind, RunStatus, StageKind, StageStat
 
 
 class FakeStage:
-    """A stage whose behaviour each test dictates."""
-
     def __init__(self, kind, *, outcomes=None):
         self.kind = kind
         self.outcomes = list(outcomes or [])
@@ -46,7 +36,6 @@ def _ok(kind, name="Requirements", value="v1"):
 
 @pytest.fixture
 def registry(monkeypatch):
-    """Install fake stages, keeping the engine under test rather than the stages."""
 
     def install(**by_kind):
         monkeypatch.setattr(engine, "REGISTRY", dict(by_kind))
@@ -58,7 +47,6 @@ def registry(monkeypatch):
 async def test_creating_a_run_creates_every_stage_pending():
     run = await engine.create_run(title="Test")
 
-    # Phase 1 runs only INGEST and PLAN; see STAGE_ORDER in app.orchestrator.state.
     assert [s.kind for s in sorted(run.stages, key=lambda s: s.position)] == [
         StageKind.INGEST,
         StageKind.PLAN,
@@ -70,17 +58,14 @@ async def test_creating_a_run_creates_every_stage_pending():
 async def test_runs_stop_at_the_approval_gate(registry):
     ingest = FakeStage(StageKind.INGEST)
     plan = FakeStage(StageKind.PLAN)
-    wbs = FakeStage(StageKind.WBS)
-    registry(INGEST=ingest, PLAN=plan, WBS=wbs)
-    monkey_kinds(ingest, plan, wbs)
+    registry(INGEST=ingest, PLAN=plan)
+    monkey_kinds(ingest, plan)
 
     run = await engine.create_run(title="Test")
     run = await engine.advance(run.id)
 
     assert run.status == RunStatus.AWAITING_APPROVAL
     assert _stage(run, StageKind.PLAN).status == StageStatus.AWAITING_APPROVAL
-    # The gate must actually gate: WBS has not been given the chance to run.
-    assert wbs.calls == 0
 
 
 async def test_approval_resumes_from_the_gate_without_redoing_earlier_work(registry):
@@ -103,7 +88,6 @@ async def test_requesting_changes_reruns_the_stage_with_the_feedback(registry):
     monkey_kinds(plan)
 
     run = await engine.create_run(title="Test")
-    # Skip straight to PLAN so this test is about feedback, not ordering.
     _stage(run, StageKind.INGEST).status = StageStatus.SKIPPED
 
     await engine.advance(run.id)
@@ -146,7 +130,6 @@ async def test_a_failure_is_recorded_where_the_user_can_see_it(registry):
 
 
 async def test_an_unexpected_exception_still_lands_on_the_run(registry):
-    """A crashing stage must fail the run visibly, not just log a traceback."""
     ingest = FakeStage(StageKind.INGEST, outcomes=[ZeroDivisionError("boom")])
     registry(INGEST=ingest)
     monkey_kinds(ingest)
@@ -172,7 +155,6 @@ async def test_a_failed_run_resumes_from_the_failed_stage(registry):
 
 
 async def test_an_unimplemented_stage_stops_the_run_cleanly(registry):
-    """Stages arrive over the build; reaching a gap is not a failure."""
     ingest = FakeStage(StageKind.INGEST)
     registry(INGEST=ingest)
     monkey_kinds(ingest)
@@ -216,7 +198,6 @@ async def test_run_updates_are_applied(registry):
 
 
 async def test_load_run_sees_artifacts_written_by_an_earlier_stage():
-    """A later stage must read what an earlier one wrote."""
     from app.orchestrator.state import Artifact
 
     run = await engine.create_run(title="Campus Booking")
@@ -230,15 +211,11 @@ async def test_load_run_sees_artifacts_written_by_an_earlier_stage():
     assert [a.kind for a in reloaded.artifacts] == [ArtifactKind.REQUIREMENTS]
 
 
-# --------------------------------------------------------------------------
-
-
 def _stage(run, kind):
     return next(s for s in run.stages if s.kind == kind)
 
 
 def monkey_kinds(*stages):
-    """The registry is keyed by StageKind; keep each fake's `kind` consistent."""
     for stage in stages:
         if isinstance(stage.kind, str):
             stage.kind = StageKind(stage.kind)

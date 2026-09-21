@@ -1,11 +1,3 @@
-"""The INGEST stage.
-
-Covers the two things that bite in practice: which messages get treated as the
-conversation, and what happens when there isn't enough conversation to plan
-from. Both are failures a user hits on their first attempt, so both should
-produce an instruction rather than a stack trace.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -50,7 +42,6 @@ REQUIREMENTS = Requirements(
 
 @pytest.fixture
 def fake_llm(monkeypatch):
-    """Replace the model call, keeping the stage's own logic under test."""
     captured = {}
 
     async def _generate(*, output_model, system, user, **kwargs):
@@ -71,7 +62,6 @@ def fake_llm(monkeypatch):
 
 
 def test_transcript_keeps_speaker_names(conversation):
-    """The model reasons about who wants what, so names must survive."""
     text = format_conversation(conversation)
     assert text.startswith("priya: We need something for booking campus event seats")
     assert "omar: Students should see what's on" in text
@@ -92,7 +82,6 @@ async def test_extracts_requirements_and_names_the_run(conversation, fake_llm):
 
     assert result.artifacts[0].kind == ArtifactKind.REQUIREMENTS
     assert result.artifacts[0].data["project_name"] == "Campus Event Booking"
-    # The run is renamed from the extraction, so the dashboard stops saying "Untitled".
     assert result.run_updates == {"title": "Campus Event Booking"}
     assert (result.input_tokens, result.output_tokens) == (100, 200)
     assert "2 features (2 must-have)" in result.summary
@@ -108,7 +97,6 @@ async def test_the_whole_conversation_reaches_the_prompt(conversation, fake_llm)
 
 
 async def test_bot_messages_are_excluded(conversation, fake_llm):
-    """The agent's own posts are not requirements."""
     store.capture_message(
         SlackMessage(
             channel_id="C123",
@@ -126,7 +114,6 @@ async def test_bot_messages_are_excluded(conversation, fake_llm):
 
 
 async def test_only_the_named_thread_is_used(fake_llm):
-    """A run started in a thread must not absorb unrelated channel chatter."""
     store.capture_message(
         SlackMessage(
             channel_id="C123",
@@ -181,7 +168,6 @@ async def test_too_short_a_conversation_gives_an_actionable_error(fake_llm):
 
 
 async def test_short_conversations_are_not_retried(fake_llm):
-    """Retrying cannot make a conversation longer, so don't burn quota on it."""
     store.capture_message(SlackMessage(channel_id="C123", ts="1", user_name="a", text="hi"))
     run = await engine.create_run(slack_channel_id="C123")
 
@@ -192,7 +178,6 @@ async def test_short_conversations_are_not_retried(fake_llm):
 
 
 async def test_runs_end_to_end_through_the_engine(conversation, fake_llm, monkeypatch):
-    """INGEST through the real engine: artifact stored, run renamed, stage complete."""
     monkeypatch.setattr(engine, "REGISTRY", {StageKind.INGEST: IngestStage()})
 
     run = await engine.create_run(slack_channel_id="C123")

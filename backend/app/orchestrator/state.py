@@ -1,11 +1,3 @@
-"""Runtime pipeline state.
-
-Nothing here is persisted. A run lives for as long as the process that created
-it: the database is authentication only, so the pipeline's own state — which
-stage it is on, what each stage produced, what it called — is plain Python
-objects held in memory for the lifetime of one run.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -23,22 +15,10 @@ def _now() -> datetime:
 
 
 class StageKind(enum.StrEnum):
-    """The six pipeline stages, in execution order."""
-
     INGEST = "INGEST"
     PLAN = "PLAN"
-    WBS = "WBS"
-    DESIGN = "DESIGN"
-    PROTOTYPE = "PROTOTYPE"
-    DONE = "DONE"
 
 
-#: Execution order. The orchestrator walks this list; there is no other ordering.
-#:
-#: Phase 1 runs only INGEST and PLAN — Slack conversation to requirements to a
-#: reviewable plan. WBS, DESIGN, PROTOTYPE and DONE stay fully implemented
-#: (``app.orchestrator.stages``) for a later phase; they are simply not part of
-#: a run's stage list until they are added back here.
 STAGE_ORDER: list[StageKind] = [
     StageKind.INGEST,
     StageKind.PLAN,
@@ -66,21 +46,10 @@ class RunStatus(enum.StrEnum):
 class ArtifactKind(enum.StrEnum):
     REQUIREMENTS = "REQUIREMENTS"
     PLAN = "PLAN"
-    WBS = "WBS"
-    DIAGRAM = "DIAGRAM"
-    PROTOTYPE_FILES = "PROTOTYPE_FILES"
-    SUMMARY = "SUMMARY"
 
 
 @dataclass
 class Artifact:
-    """A structured output produced by a stage.
-
-    `data` holds the validated JSON the LLM produced against that stage's schema.
-    `text` holds raw text output where that is the natural form (Mermaid source,
-    generated file contents).
-    """
-
     kind: ArtifactKind
     name: str
     version: int = 1
@@ -92,9 +61,7 @@ class Artifact:
 
 @dataclass
 class AuditRow:
-    """One model call or external API call, kept for the run's lifetime."""
-
-    kind: str  # "llm" | "api"
+    kind: str
     target: str
     ok: bool = True
     duration_ms: int = 0
@@ -108,8 +75,6 @@ class AuditRow:
 
 @dataclass
 class Stage:
-    """One step of the pipeline within a run."""
-
     kind: StageKind
     position: int
     status: StageStatus = StageStatus.PENDING
@@ -130,8 +95,6 @@ class Stage:
 
 @dataclass
 class SlackMessage:
-    """One captured Slack message, held in memory for the process's lifetime."""
-
     channel_id: str
     ts: str
     thread_ts: str | None = None
@@ -143,23 +106,14 @@ class SlackMessage:
 
 @dataclass
 class Run:
-    """One end-to-end pass from a Slack conversation to a deployed prototype."""
-
     title: str = "Untitled project"
     status: RunStatus = RunStatus.PENDING
     current_stage: StageKind | None = None
     error: str | None = None
 
-    # Where the conversation lives. thread_ts is None for whole-channel runs.
     slack_channel_id: str | None = None
     slack_thread_ts: str | None = None
     started_by: str | None = None
-
-    # External artifacts produced by later stages.
-    asana_project_gid: str | None = None
-    asana_project_url: str | None = None
-    github_repo_url: str | None = None
-    vercel_url: str | None = None
 
     id: uuid.UUID = field(default_factory=_uuid)
     created_at: datetime = field(default_factory=_now)
