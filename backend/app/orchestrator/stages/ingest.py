@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
-
 from app.llm.client import generate_structured
-from app.models import ArtifactKind, SlackMessage, StageKind
+from app.orchestrator import store
 from app.orchestrator.base import ProducedArtifact, StageContext, StageFailed, StageResult
+from app.orchestrator.state import ArtifactKind, SlackMessage, StageKind
 from app.schemas.requirements import Requirements
 
 #: Below this, there is no conversation to speak of — see the check in run().
@@ -127,18 +126,11 @@ class IngestStage:
     async def _load_messages(self, ctx: StageContext) -> list[SlackMessage]:
         """Messages belonging to this run's conversation, oldest first.
 
-        Matched on channel plus thread rather than on run_id, because messages
-        are captured as they arrive and only claimed by a run afterwards.
+        Matched on channel plus thread rather than on the run itself, because
+        messages are captured as they arrive and only claimed by a run
+        afterwards.
         """
-        query = select(SlackMessage).where(SlackMessage.is_bot.is_(False))
-
-        if ctx.run.slack_channel_id:
-            query = query.where(SlackMessage.channel_id == ctx.run.slack_channel_id)
-            if ctx.run.slack_thread_ts:
-                query = query.where(SlackMessage.thread_ts == ctx.run.slack_thread_ts)
-        else:
-            query = query.where(SlackMessage.run_id == ctx.run.id)
-
-        query = query.order_by(SlackMessage.ts)
-        result = await ctx.session.execute(query)
-        return list(result.scalars())
+        if not ctx.run.slack_channel_id:
+            return []
+        messages = store.messages_for(ctx.run.slack_channel_id, ctx.run.slack_thread_ts)
+        return [m for m in messages if not m.is_bot]

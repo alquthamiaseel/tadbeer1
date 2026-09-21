@@ -1,23 +1,26 @@
-.PHONY: help install db db-stop check migrate revision api slack web dev seed e2e test fmt lint clean
+.PHONY: help install db db-stop check migrate revision create-user api web dev seed e2e test fmt lint clean
 
 help:
-	@echo "make install   install backend + frontend dependencies"
-	@echo "make db        start Postgres (docker compose)"
-	@echo "make check     verify every API credential"
-	@echo "make migrate   apply database migrations"
-	@echo "make revision  autogenerate a migration (m=\"message\")"
-	@echo "make api       run the backend only"
-	@echo "make slack     run the Slack listener only"
-	@echo "make web       run the frontend only"
-	@echo "make dev       run backend + Slack listener + frontend together"
-	@echo "make seed      load a canned conversation (c=CHANNEL_ID)"
-	@echo "make e2e       run the full pipeline for real and check the result (c=CHANNEL_ID)"
-	@echo "make test      run the backend test suite"
-	@echo "make fmt       format and autofix"
+	@echo "make install      install backend dependencies (+ frontend, once frontend/ exists)"
+	@echo "make db           start Postgres (docker compose)"
+	@echo "make check        verify every API credential"
+	@echo "make migrate      apply database migrations"
+	@echo "make revision     autogenerate a migration (m=\"message\")"
+	@echo "make create-user  create a dashboard login (u=username p=password)"
+	@echo "make api          run the backend, including the Slack listener"
+	@echo "make web          run the frontend only (needs frontend/)"
+	@echo "make dev          run backend (+ frontend, once frontend/ exists)"
+	@echo "make seed         load a canned conversation into the running backend (c=CHANNEL_ID)"
+	@echo "make e2e          run INGEST+PLAN for real and check the result (c=CHANNEL_ID)"
+	@echo "make test         run the backend test suite"
+	@echo "make fmt          format and autofix"
 
+# Phase 1 has no frontend/ yet — it is added back once one exists, so
+# `make install`/`make dev` work today and pick it up automatically later.
 install:
 	cd backend && uv sync
-	cd frontend && npm install
+	@if [ -d frontend ]; then cd frontend && npm install; else \
+		echo "frontend/ not present yet; skipping npm install"; fi
 
 db:
 	docker compose up -d db
@@ -37,21 +40,27 @@ migrate:
 revision:
 	cd backend && uv run alembic revision --autogenerate -m "$(m)"
 
-slack:
-	cd backend && uv run python -m app.slack_runner
+create-user:
+	@test -n "$(u)" && test -n "$(p)" || (echo "usage: make create-user u=alice p=secret" && exit 1)
+	cd backend && uv run python -m scripts.create_user --username $(u) --password $(p)
 
 api:
 	cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 web:
-	cd frontend && npm run dev
+	@if [ -d frontend ]; then cd frontend && npm run dev; else \
+		echo "frontend/ not present yet; nothing to run" && exit 1; fi
 
 dev:
-	@trap 'kill 0' EXIT; \
-	( cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 ) & \
-	( cd backend && uv run python -m app.slack_runner ) & \
-	( cd frontend && npm run dev ) & \
-	wait
+	@if [ -d frontend ]; then \
+		trap 'kill 0' EXIT; \
+		( cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 ) & \
+		( cd frontend && npm run dev ) & \
+		wait; \
+	else \
+		echo "frontend/ not present yet; running the backend only"; \
+		cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000; \
+	fi
 
 seed:
 	@test -n "$(c)" || (echo "usage: make seed c=C0123456789" && exit 1)

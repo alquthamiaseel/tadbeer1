@@ -1,17 +1,17 @@
 """The pipeline engine.
 
 Walks a run through the six stages in order. The engine owns everything that is
-the same for every stage — timing, status transitions, persistence, retries,
-approval gates — so a stage only has to produce its artifact.
+the same for every stage — timing, status transitions, retries, approval
+gates — so a stage only has to produce its artifact.
 
-Two properties matter and both come from the same decision, that state lives in
-the database rather than in memory:
+State lives in memory, in the ``store`` module, for the lifetime of the run:
 
-* **Resumable.** :func:`advance` starts from the first stage that is not
-  complete, so a crash, a restart, or an exhausted free-tier quota costs the
-  current stage and nothing before it.
+* **Resumable within the process.** :func:`advance` starts from the first
+  stage that is not complete, so calling it again after a transient failure
+  costs only the current stage.
 * **Re-runnable.** Any single stage can be reset and run again with feedback,
-  because its inputs are artifacts on disk, not values held by a caller.
+  because its inputs are artifacts already attached to the run, not values held
+  by a caller.
 """
 
 from __future__ import annotations
@@ -21,21 +21,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
-
 from app import audit
-from app.models import (
-    STAGE_ORDER,
-    Artifact,
-    AuditLog,
-    Run,
-    RunStatus,
-    Stage,
-    StageKind,
-    StageStatus,
-)
+from app.orchestrator import store
 from app.orchestrator.base import StageContext, StageFailed, StageResult
 from app.orchestrator.stages.design import DesignStage
 from app.orchestrator.stages.done import DoneStage
@@ -43,6 +30,16 @@ from app.orchestrator.stages.ingest import IngestStage
 from app.orchestrator.stages.plan import PlanStage
 from app.orchestrator.stages.prototype import PrototypeStage
 from app.orchestrator.stages.wbs import WbsStage
+from app.orchestrator.state import (
+    STAGE_ORDER,
+    Artifact,
+    AuditRow,
+    Run,
+    RunStatus,
+    Stage,
+    StageKind,
+    StageStatus,
+)
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +66,6 @@ def _now() -> datetime:
 
 
 async def create_run(
-    session: AsyncSession,
     *,
     title: str = "Untitled project",
     slack_channel_id: str | None = None,
@@ -84,38 +80,15 @@ async def create_run(
         slack_thread_ts=slack_thread_ts,
         started_by=started_by,
     )
-    session.add(run)
-    await session.flush()
-
-    for position, kind in enumerate(STAGE_ORDER):
-        session.add(Stage(run_id=run.id, kind=kind, position=position))
-
-    await session.commit()
+    run.stages = [Stage(kind=kind, position=position) for position, kind in enumerate(STAGE_ORDER)]
+    store.add(run)
     log.info("created run %s (%s)", run.id, title)
-    # Reload eagerly: callers walk run.stages, and a lazy load would attempt
-    # synchronous IO from async context.
-    loaded = await load_run(session, run.id)
-    assert loaded is not None
-    return loaded
+    return run
 
 
-async def load_run(session: AsyncSession, run_id: uuid.UUID) -> Run | None:
-    """Load a run with its stages and artifacts, refreshed from the database.
-
-    ``populate_existing`` is what makes this authoritative rather than advisory.
-    Sessions are created with ``expire_on_commit=False`` — deliberately, so that
-    objects stay usable after a commit — but the cost is that a query returning
-    an instance already in the identity map leaves its collections as they were.
-    A stage reading ``run.artifacts`` would then see the collection as of the
-    last load, missing what an earlier stage had just written.
-    """
-    result = await session.execute(
-        select(Run)
-        .where(Run.id == run_id)
-        .options(selectinload(Run.stages), selectinload(Run.artifacts))
-        .execution_options(populate_existing=True)
-    )
-    return result.scalar_one_or_none()
+async def load_run(run_id: uuid.UUID) -> Run | None:
+    """The run as it stands right now. There is nothing to reload from."""
+    return store.get(run_id)
 
 
 def next_stage(run: Run) -> Stage | None:
@@ -134,7 +107,6 @@ StageObserver = Callable[[Run, Stage], Awaitable[None]]
 
 
 async def advance(
-    session: AsyncSession,
     run_id: uuid.UUID,
     *,
     feedback: str | None = None,
@@ -145,7 +117,7 @@ async def advance(
     Safe to call repeatedly: it always resumes from the first incomplete stage,
     so the same call both starts a fresh run and continues an interrupted one.
     """
-    run = await load_run(session, run_id)
+    run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")
 
@@ -155,7 +127,7 @@ async def advance(
         if stage is None:
             run.status = RunStatus.COMPLETE
             run.current_stage = None
-            await session.commit()
+            run.updated_at = _now()
             log.info("run %s complete", run.id)
             return run
 
@@ -170,10 +142,10 @@ async def advance(
             log.info("run %s reached unimplemented stage %s; stopping", run.id, stage.kind)
             run.status = RunStatus.RUNNING
             run.current_stage = stage.kind
-            await session.commit()
+            run.updated_at = _now()
             return run
 
-        ok = await _run_stage(session, run, stage, implementation, feedback)
+        ok = await _run_stage(run, stage, implementation, feedback)
         feedback = None  # applies to the stage it was given for, not the ones after
 
         if on_stage is not None:
@@ -188,46 +160,38 @@ async def advance(
             return run
 
 
-async def _run_stage(
-    session: AsyncSession,
-    run: Run,
-    stage: Stage,
-    implementation,
-    feedback: str | None,
-) -> bool:
-    """Execute one stage and persist everything it produced. True if it advanced."""
+async def _run_stage(run: Run, stage: Stage, implementation, feedback: str | None) -> bool:
+    """Execute one stage and record everything it produced. True if it advanced."""
     stage.status = StageStatus.RUNNING
     stage.attempt += 1
     stage.started_at = _now()
     stage.error = None
     run.status = RunStatus.RUNNING
     run.current_stage = stage.kind
-    await session.commit()
+    run.updated_at = _now()
 
     log.info("run %s stage %s starting (attempt %d)", run.id, stage.kind, stage.attempt)
 
     # Everything the stage calls records into this collector, whether or not it
-    # knows the engine exists. Persisted below even when the stage fails —
-    # a failed stage is exactly when the call log is worth having.
+    # knows the engine exists. Recorded below even when the stage fails — a
+    # failed stage is exactly when the call log is worth having.
     with audit.collecting() as calls:
         try:
             result: StageResult = await implementation.run(
-                StageContext(run=run, session=session, feedback=feedback)
+                StageContext(run=run, feedback=feedback)
             )
         except StageFailed as exc:
-            return await _fail(session, run, stage, str(exc), calls)
-        except Exception as exc:  # noqa: BLE001 - failures land in the DB, not just the log
+            return _fail(run, stage, str(exc), calls)
+        except Exception as exc:  # noqa: BLE001 - failures must be visible, not just logged
             log.exception("run %s stage %s raised", run.id, stage.kind)
-            return await _fail(session, run, stage, f"{type(exc).__name__}: {exc}", calls)
+            return _fail(run, stage, f"{type(exc).__name__}: {exc}", calls)
 
-    _persist_audit(session, run, stage, calls)
+    _record_audit(run, stage, calls)
 
     for produced in result.artifacts:
         existing = [a for a in run.artifacts if a.kind == produced.kind and a.name == produced.name]
-        session.add(
+        run.artifacts.append(
             Artifact(
-                run_id=run.id,
-                stage_id=stage.id,
                 kind=produced.kind,
                 name=produced.name,
                 # Re-running a stage adds a version rather than overwriting, so
@@ -248,9 +212,7 @@ async def _run_stage(
     gated = result.needs_approval or stage.kind in APPROVAL_GATES
     stage.status = StageStatus.AWAITING_APPROVAL if gated else StageStatus.COMPLETE
     run.status = RunStatus.AWAITING_APPROVAL if gated else RunStatus.RUNNING
-
-    await session.commit()
-    await session.refresh(run, ["artifacts", "stages"])
+    run.updated_at = _now()
 
     log.info(
         "run %s stage %s %s in %.1fs (%d/%d tokens)",
@@ -264,13 +226,11 @@ async def _run_stage(
     return True
 
 
-def _persist_audit(session: AsyncSession, run: Run, stage: Stage, calls: audit.Collector) -> None:
-    """Queue one AuditLog row per call. Committed with the rest of the stage."""
+def _record_audit(run: Run, stage: Stage, calls: audit.Collector) -> None:
+    """Append one AuditRow per call the stage made."""
     for entry in calls.entries:
-        session.add(
-            AuditLog(
-                run_id=run.id,
-                stage_id=stage.id,
+        run.audit.append(
+            AuditRow(
                 kind=entry.kind,
                 target=entry.target,
                 ok=entry.ok,
@@ -283,10 +243,8 @@ def _persist_audit(session: AsyncSession, run: Run, stage: Stage, calls: audit.C
         )
 
 
-async def _fail(
-    session: AsyncSession, run: Run, stage: Stage, message: str, calls: audit.Collector
-) -> bool:
-    _persist_audit(session, run, stage, calls)
+def _fail(run: Run, stage: Stage, message: str, calls: audit.Collector) -> bool:
+    _record_audit(run, stage, calls)
     # A stage that failed on its third model call still spent the first two. The
     # collector is the only record of that, because the stage never got to
     # return a result — leaving these at zero would understate real usage
@@ -298,21 +256,19 @@ async def _fail(
     stage.error = message
     run.status = RunStatus.FAILED
     run.error = f"{stage.kind}: {message}"
-    await session.commit()
+    run.updated_at = _now()
     log.error("run %s stage %s failed: %s", run.id, stage.kind, message)
     return False
 
 
-async def mark_stage_approved(
-    session: AsyncSession, run_id: uuid.UUID, stage_kind: StageKind
-) -> Run:
+async def mark_stage_approved(run_id: uuid.UUID, stage_kind: StageKind) -> Run:
     """Record that a human approved a gated stage, without running anything.
 
     Separate from :func:`approve` because the caller that has a human waiting —
     a Slack button — wants to answer immediately and let the rest of the
     pipeline continue in the background.
     """
-    run = await load_run(session, run_id)
+    run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")
 
@@ -321,24 +277,21 @@ async def mark_stage_approved(
         raise ValueError(f"{stage_kind} is not awaiting approval on run {run_id}")
 
     stage.status = StageStatus.COMPLETE
-    await session.commit()
     return run
 
 
 async def approve(
-    session: AsyncSession,
     run_id: uuid.UUID,
     stage_kind: StageKind,
     *,
     on_stage: StageObserver | None = None,
 ) -> Run:
     """Mark a gated stage approved and carry on."""
-    await mark_stage_approved(session, run_id, stage_kind)
-    return await advance(session, run_id, on_stage=on_stage)
+    await mark_stage_approved(run_id, stage_kind)
+    return await advance(run_id, on_stage=on_stage)
 
 
 async def request_changes(
-    session: AsyncSession,
     run_id: uuid.UUID,
     stage_kind: StageKind,
     feedback: str,
@@ -346,7 +299,7 @@ async def request_changes(
     on_stage: StageObserver | None = None,
 ) -> Run:
     """Send a gated stage back to be redone with the reviewer's feedback."""
-    run = await load_run(session, run_id)
+    run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")
 
@@ -355,12 +308,10 @@ async def request_changes(
         raise ValueError(f"{stage_kind} is not a stage of run {run_id}")
 
     stage.status = StageStatus.PENDING
-    await session.commit()
-    return await advance(session, run_id, feedback=feedback, on_stage=on_stage)
+    return await advance(run_id, feedback=feedback, on_stage=on_stage)
 
 
 async def rerun_stage(
-    session: AsyncSession,
     run_id: uuid.UUID,
     stage_kind: StageKind,
     *,
@@ -373,7 +324,7 @@ async def rerun_stage(
     about to change; leaving them complete would leave the run internally
     inconsistent.
     """
-    run = await load_run(session, run_id)
+    run = store.get(run_id)
     if run is None:
         raise ValueError(f"no such run: {run_id}")
 
@@ -390,5 +341,4 @@ async def rerun_stage(
 
     run.error = None
     run.status = RunStatus.PENDING
-    await session.commit()
-    return await advance(session, run_id, feedback=feedback, on_stage=on_stage)
+    return await advance(run_id, feedback=feedback, on_stage=on_stage)

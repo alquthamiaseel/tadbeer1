@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 
 from app.llm.client import generate_structured
-from app.models import ArtifactKind, StageKind
 from app.orchestrator.base import ProducedArtifact, StageContext, StageResult, artifact_data
+from app.orchestrator.state import ArtifactKind, StageKind
 from app.schemas.plan import ProjectPlan
 
 SYSTEM = """\

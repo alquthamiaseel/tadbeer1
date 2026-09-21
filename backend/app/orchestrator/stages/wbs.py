@@ -1,14 +1,9 @@
-"""WBS — derive a dependency-aware task graph and publish it to Asana.
+"""WBS — derive a dependency-aware task graph.
 
-Publishing can be turned off with ``ASANA_ENABLED=false``. The work breakdown
-is the artifact; Asana is where it gets *shown*. Losing access to the second —
-a workspace that has not arrived yet, or a free tier that cannot link
-dependencies — should not cost the first, and the dashboard renders the task
-graph with its dependencies either way.
-
-Opt-out rather than automatic: a missing token with publishing still enabled is
-almost always a misconfiguration, and silently skipping it would hide that until
-the demo.
+Not part of the Phase 1 demo (Slack → requirements → plan → dashboard); this
+stage still runs if a plan is approved, but the Asana publishing step has been
+removed from this build. The task graph itself is still produced and stored as
+an artifact; only the push to an external Asana project is gone.
 """
 
 from __future__ import annotations
@@ -16,10 +11,7 @@ from __future__ import annotations
 import json
 import logging
 
-from app.config import settings
-from app.integrations.asana import AsanaClient
 from app.llm.client import generate_structured
-from app.models import ArtifactKind, StageKind
 from app.orchestrator.base import (
     ProducedArtifact,
     StageContext,
@@ -27,6 +19,7 @@ from app.orchestrator.base import (
     StageResult,
     artifact_data,
 )
+from app.orchestrator.state import ArtifactKind, StageKind
 from app.schemas.wbs import WorkBreakdownStructure
 
 log = logging.getLogger(__name__)
@@ -57,20 +50,7 @@ class WbsStage:
         self._validate_dependencies(wbs)
 
         dependencies = sum(len(task.depends_on) for task in wbs.tasks)
-        run_updates: dict[str, object] = {}
-
-        if settings.asana_enabled:
-            project_gid, project_url = await AsanaClient().publish(ctx.run.title, wbs)
-            run_updates = {"asana_project_gid": project_gid, "asana_project_url": project_url}
-            summary = f"Published {len(wbs.tasks)} tasks to Asana"
-        else:
-            # The work breakdown is the artifact; Asana is where it gets shown.
-            # Losing the second must not cost the first.
-            log.info("ASANA_ENABLED is false; keeping the WBS without publishing it")
-            summary = (
-                f"{len(wbs.tasks)} tasks with {dependencies} dependencies "
-                "(Asana publishing is turned off)"
-            )
+        summary = f"{len(wbs.tasks)} tasks with {dependencies} dependencies"
 
         return StageResult(
             artifacts=[
@@ -82,7 +62,6 @@ class WbsStage:
             ],
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
-            run_updates=run_updates,
             summary=summary,
         )
 

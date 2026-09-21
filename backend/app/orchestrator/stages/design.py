@@ -1,13 +1,18 @@
-"""DESIGN — turn the approved plan into four Mermaid views of the system."""
+"""DESIGN — turn the approved plan into four Mermaid views of the system.
+
+Not part of the Phase 1 demo. The Mermaid syntax validator this stage used to
+repair against has been removed from this build, so diagrams are stored as the
+model produces them, with code fences stripped, but without a validate/repair
+loop.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 
 from app.llm.client import generate_structured
-from app.mermaid import check, describe, strip_fences
-from app.models import ArtifactKind, StageKind
 from app.orchestrator.base import (
     ProducedArtifact,
     StageContext,
@@ -15,7 +20,8 @@ from app.orchestrator.base import (
     StageResult,
     artifact_data,
 )
-from app.schemas.design import ALLOWED_HEADERS, Diagram, DiagramKind, SystemDesign
+from app.orchestrator.state import ArtifactKind, StageKind
+from app.schemas.design import Diagram, DiagramKind, SystemDesign
 
 log = logging.getLogger(__name__)
 
@@ -66,13 +72,19 @@ Revise the design accordingly.
 
 REPAIR_TEMPLATE = """\
 
-Your previous diagrams contained Mermaid syntax errors and would not render:
+Your previous response had a problem:
 
 {problems}
 
-Produce the four diagrams again with those errors fixed. Remember that every
-node label must be wrapped in double quotes.
+Produce the four diagrams again with that fixed.
 """
+
+_FENCE_RE = re.compile(r"^```[a-zA-Z]*\n|\n```$")
+
+
+def strip_fences(source: str) -> str:
+    """Strip a leading/trailing markdown code fence the model wrapped around the source."""
+    return _FENCE_RE.sub("", source.strip())
 
 
 class DesignStage:
@@ -93,9 +105,9 @@ class DesignStage:
         design: SystemDesign | None = None
         problems = ""
 
-        # One repair attempt. A second is not worth another call against a
-        # per-minute quota: if the model cannot fix its own Mermaid once, the
-        # run should fail loudly rather than store diagrams that will not render.
+        # One repair attempt, for a missing diagram kind only. There is no
+        # Mermaid syntax validator in this build, so a diagram is stored as the
+        # model produced it once code fences are stripped.
         for attempt in range(2):
             result = await generate_structured(
                 output_model=SystemDesign,
@@ -111,13 +123,10 @@ class DesignStage:
             if not problems:
                 design = candidate
                 break
-            log.warning("DESIGN produced invalid Mermaid (attempt %d): %s", attempt + 1, problems)
+            log.warning("DESIGN produced invalid output (attempt %d): %s", attempt + 1, problems)
 
         if design is None:
-            raise StageFailed(
-                "The generated diagrams contain Mermaid syntax errors that could not be "
-                f"repaired:\n{problems}"
-            )
+            raise StageFailed(f"The generated design could not be repaired:\n{problems}")
 
         return StageResult(
             artifacts=[
@@ -158,19 +167,11 @@ def _normalise(design: SystemDesign) -> SystemDesign:
 
 def _problems(design: SystemDesign) -> str:
     """Everything wrong with this design, as one message for the repair prompt."""
-    reports: list[str] = []
-
     produced = {diagram.kind for diagram in design.diagrams}
     missing = [kind.value for kind in DiagramKind if kind not in produced]
-    if missing:
-        reports.append(f"missing required diagram kinds: {', '.join(missing)}")
-
-    for diagram in design.diagrams:
-        found = check(diagram.mermaid, expected_headers=ALLOWED_HEADERS[diagram.kind])
-        if found:
-            reports.append(f"{diagram.kind.value} ({diagram.title}): {describe(found)}")
-
-    return "\n".join(f"* {report}" for report in reports)
+    if not missing:
+        return ""
+    return f"* missing required diagram kinds: {', '.join(missing)}"
 
 
 def diagram_markdown(diagrams: list[Diagram]) -> str:

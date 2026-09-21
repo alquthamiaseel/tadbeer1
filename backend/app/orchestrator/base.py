@@ -12,9 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models import ArtifactKind, Run, StageKind
+from app.orchestrator.state import ArtifactKind, Run, StageKind
 
 
 @dataclass
@@ -22,7 +20,6 @@ class StageContext:
     """Everything a stage is allowed to reach for."""
 
     run: Run
-    session: AsyncSession
     #: Feedback from a human who rejected this stage's previous output, if any.
     feedback: str | None = None
 
@@ -40,8 +37,8 @@ class StageResult:
     """What a stage hands back to the engine.
 
     A stage never writes its own status or artifacts — it returns them, and the
-    engine persists them in one transaction. That keeps "ran but didn't record"
-    out of the set of possible states.
+    engine attaches them to the run in one place. That keeps "ran but didn't
+    record" out of the set of possible states.
     """
 
     artifacts: list[ProducedArtifact] = field(default_factory=list)

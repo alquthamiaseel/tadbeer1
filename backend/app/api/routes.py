@@ -6,9 +6,9 @@ a decision made in the dashboard would leave no trace where the stakeholders are
 talking.
 
 Progress is streamed rather than polled by the browser. The stream itself polls
-the database once a second, which is the right trade here: runs are minutes
-long and low-volume, and a pub/sub broker would be a second service to install
-and keep alive for a signal this small.
+the in-memory run once a second — runs are minutes long and low-volume, and a
+pub/sub broker would be a second service to install and keep alive for a signal
+this small.
 """
 
 from __future__ import annotations
@@ -22,14 +22,10 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.api.auth import require_dashboard_auth
-from app.db import SessionLocal, get_session
-from app.models import Artifact, AuditLog, Run, RunStatus, Stage, StageKind
-from app.orchestrator import engine
+from app.orchestrator import engine, store
+from app.orchestrator.state import Artifact, AuditRow, Run, RunStatus, Stage, StageKind
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +138,21 @@ def _artifact_out(artifact: Artifact) -> ArtifactOut:
     )
 
 
+def _audit_out(row: AuditRow) -> AuditOut:
+    return AuditOut(
+        id=row.id,
+        kind=row.kind,
+        target=row.target,
+        ok=row.ok,
+        duration_ms=row.duration_ms,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        detail=row.detail,
+        error=row.error,
+        created_at=row.created_at.isoformat(),
+    )
+
+
 def _detail(run: Run) -> RunDetailOut:
     return RunDetailOut(
         **_summary(run).model_dump(),
@@ -156,88 +167,56 @@ def _detail(run: Run) -> RunDetailOut:
     )
 
 
-async def _load(session: AsyncSession, run_id: uuid.UUID) -> Run:
-    result = await session.execute(
-        select(Run)
-        .where(Run.id == run_id)
-        .options(selectinload(Run.stages), selectinload(Run.artifacts))
-        .execution_options(populate_existing=True)
-    )
-    run = result.scalar_one_or_none()
+def _load(run_id: uuid.UUID) -> Run:
+    run = store.get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
 
 
 @router.get("/runs", response_model=list[RunSummaryOut])
-async def list_runs(session: AsyncSession = Depends(get_session)) -> list[RunSummaryOut]:
-    result = await session.execute(select(Run).order_by(Run.created_at.desc()).limit(100))
-    return [_summary(run) for run in result.scalars()]
+async def list_runs() -> list[RunSummaryOut]:
+    return [_summary(run) for run in store.list_runs()[:100]]
 
 
 @router.get("/runs/{run_id}", response_model=RunDetailOut)
-async def get_run(run_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> RunDetailOut:
-    return _detail(await _load(session, run_id))
+async def get_run(run_id: uuid.UUID) -> RunDetailOut:
+    return _detail(_load(run_id))
 
 
 @router.get("/runs/{run_id}/audit", response_model=list[AuditOut])
-async def get_audit(
-    run_id: uuid.UUID, session: AsyncSession = Depends(get_session)
-) -> list[AuditOut]:
+async def get_audit(run_id: uuid.UUID) -> list[AuditOut]:
     """Every model and external API call this run made."""
-    result = await session.execute(
-        select(AuditLog).where(AuditLog.run_id == run_id).order_by(AuditLog.created_at)
-    )
-    return [
-        AuditOut(
-            id=row.id,
-            kind=row.kind,
-            target=row.target,
-            ok=row.ok,
-            duration_ms=row.duration_ms,
-            input_tokens=row.input_tokens,
-            output_tokens=row.output_tokens,
-            detail=row.detail,
-            error=row.error,
-            created_at=row.created_at.isoformat(),
-        )
-        for row in result.scalars()
-    ]
+    run = _load(run_id)
+    return [_audit_out(row) for row in sorted(run.audit, key=lambda r: r.created_at)]
 
 
 @router.get("/runs/{run_id}/artifacts/{artifact_id}", response_model=ArtifactOut)
-async def get_artifact(
-    run_id: uuid.UUID,
-    artifact_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
-) -> ArtifactOut:
-    result = await session.execute(
-        select(Artifact).where(Artifact.id == artifact_id, Artifact.run_id == run_id)
-    )
-    artifact = result.scalar_one_or_none()
+async def get_artifact(run_id: uuid.UUID, artifact_id: uuid.UUID) -> ArtifactOut:
+    run = _load(run_id)
+    artifact = next((a for a in run.artifacts if a.id == artifact_id), None)
     if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return _artifact_out(artifact)
 
 
 @router.get("/stages/{stage_id}", response_model=StageOut)
-async def get_stage(stage_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> StageOut:
-    stage = await session.get(Stage, stage_id)
-    if stage is None:
-        raise HTTPException(status_code=404, detail="Stage not found")
-    return _stage_out(stage)
+async def get_stage(stage_id: uuid.UUID) -> StageOut:
+    for run in store.list_runs():
+        stage = next((s for s in run.stages if s.id == stage_id), None)
+        if stage is not None:
+            return _stage_out(stage)
+    raise HTTPException(status_code=404, detail="Stage not found")
 
 
 @router.post("/runs/{run_id}/rerun", response_model=RunDetailOut)
-async def rerun(
-    run_id: uuid.UUID, body: RerunIn, session: AsyncSession = Depends(get_session)
-) -> RunDetailOut:
+async def rerun(run_id: uuid.UUID, body: RerunIn) -> RunDetailOut:
     """Reset a stage and everything after it, then run forward in the background.
 
     Returns immediately with the reset state. A run takes minutes; holding the
     HTTP request open for it would only invite a proxy to time it out.
     """
-    run = await _load(session, run_id)
+    run = _load(run_id)
     if not any(stage.kind == body.stage for stage in run.stages):
         raise HTTPException(status_code=400, detail=f"{body.stage} is not a stage of this run")
 
@@ -246,10 +225,8 @@ async def rerun(
 
 
 async def _rerun_in_background(run_id: uuid.UUID, stage: StageKind, feedback: str | None) -> None:
-    """Own session: the request's is closed the moment the response is sent."""
     try:
-        async with SessionLocal() as session:
-            await engine.rerun_stage(session, run_id, stage, feedback=feedback)
+        await engine.rerun_stage(run_id, stage, feedback=feedback)
     except Exception:  # noqa: BLE001 - a background task must not die silently
         log.exception("background re-run of %s on run %s failed", stage, run_id)
 
@@ -277,17 +254,20 @@ async def stream_events(run_id: uuid.UUID) -> StreamingResponse:
         since_heartbeat = 0.0
         try:
             while True:
-                async with SessionLocal() as session:
-                    run = await _load(session, run_id)
-                    signature = _signature(run)
-                    if signature != previous:
-                        previous = signature
-                        since_heartbeat = 0.0
-                        payload = _detail(run).model_dump(mode="json")
-                        yield f"data: {json.dumps(payload)}\n\n"
-                    if run.status in TERMINAL_RUN_STATUSES:
-                        yield "event: end\ndata: {}\n\n"
-                        return
+                run = store.get(run_id)
+                if run is None:
+                    yield 'event: error\ndata: {"detail": "Run not found"}\n\n'
+                    return
+
+                signature = _signature(run)
+                if signature != previous:
+                    previous = signature
+                    since_heartbeat = 0.0
+                    payload = _detail(run).model_dump(mode="json")
+                    yield f"data: {json.dumps(payload)}\n\n"
+                if run.status in TERMINAL_RUN_STATUSES:
+                    yield "event: end\ndata: {}\n\n"
+                    return
 
                 await asyncio.sleep(POLL_SECONDS)
                 since_heartbeat += POLL_SECONDS
@@ -296,8 +276,6 @@ async def stream_events(run_id: uuid.UUID) -> StreamingResponse:
                     yield ": heartbeat\n\n"
         except asyncio.CancelledError:  # the browser navigated away
             raise
-        except HTTPException:
-            yield 'event: error\ndata: {"detail": "Run not found"}\n\n'
 
     return StreamingResponse(
         frames(),

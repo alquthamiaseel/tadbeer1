@@ -1,9 +1,8 @@
-"""PROTOTYPE — generate a static prototype, commit it, and deploy it live.
+"""PROTOTYPE — generate a static prototype file set.
 
-The stage does three things in order, and the order matters: generate, then
-GitHub, then Vercel. GitHub comes first because a committed prototype is a
-recoverable artifact — if Vercel fails, the code still exists and the run can be
-re-run from the deployment step rather than regenerating from scratch.
+Not part of the Phase 1 demo. The GitHub-commit and Vercel-deploy steps have
+been removed from this build; the stage still generates the static file set
+and stores it as an artifact, but does not publish it anywhere.
 """
 
 from __future__ import annotations
@@ -11,10 +10,7 @@ from __future__ import annotations
 import json
 import logging
 
-from app.integrations.github import GitHubClient, slugify
-from app.integrations.vercel import VercelClient
 from app.llm.client import generate_structured
-from app.models import ArtifactKind, StageKind
 from app.orchestrator.base import (
     ProducedArtifact,
     StageContext,
@@ -22,6 +18,7 @@ from app.orchestrator.base import (
     StageResult,
     artifact_data,
 )
+from app.orchestrator.state import ArtifactKind, StageKind
 from app.schemas.design import Diagram
 from app.schemas.prototype import ENTRY_POINT, Prototype, problems
 
@@ -105,14 +102,6 @@ class PrototypeStage:
         files = prototype.file_map()
         files["README.md"] = readme(ctx.run.title, prototype, diagrams)
 
-        repo_name, repo_url = await GitHubClient().publish(
-            repo_name=slugify(ctx.run.title),
-            description=prototype.tagline,
-            files=files,
-            message=f"Generated prototype for {ctx.run.title}",
-        )
-        live_url = await VercelClient().deploy(name=repo_name, files=files)
-
         return StageResult(
             artifacts=[
                 ProducedArtifact(
@@ -124,15 +113,12 @@ class PrototypeStage:
                         "screens": [screen.model_dump() for screen in prototype.screens],
                         "notes": prototype.notes,
                         "files": files,
-                        "repo_url": repo_url,
-                        "live_url": live_url,
                     },
                 )
             ],
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            run_updates={"github_repo_url": repo_url, "vercel_url": live_url},
-            summary=f"{len(prototype.screens)} screens deployed to {live_url}",
+            summary=f"{len(prototype.screens)} screens generated (not published in this build)",
         )
 
     async def _generate(self, prompt: str) -> tuple[Prototype, int, int]:

@@ -1,20 +1,17 @@
-"""Verify every external credential before anything else runs.
+"""Verify every credential Phase 1 needs before anything else runs.
 
-    make check              # fast: read-only probes against all five APIs
-    make check ARGS=--deep  # also proves Asana can actually link dependencies
+    make check
 
-The deep check exists because of a specific trap: **Asana task dependencies
-require a paid workspace tier**, and the free tier fails at the point of linking
-rather than at authentication. A read-only probe cannot tell the difference, so
-the deep check creates a throwaway project, links two tasks, and deletes it.
-Run it once on day one — finding this out on the day you build the WBS stage is
-a lost day.
+Phase 1 runs only INGEST and PLAN (see STAGE_ORDER in app.orchestrator.state),
+so this checks only what those need: Gemini, Slack, and the dashboard-login
+database. Asana/GitHub/Vercel publishing has been removed from this build —
+those stages still exist in the codebase for a later phase, but nothing here
+checks credentials for services this build does not call.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
 
 import httpx
 
@@ -159,241 +156,6 @@ async def check_slack() -> list[Result]:
 
 
 # --------------------------------------------------------------------------
-# Asana
-# --------------------------------------------------------------------------
-ASANA = "https://app.asana.com/api/1.0"
-
-
-def _asana_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {settings.asana_access_token}"}
-
-
-async def check_asana(deep: bool) -> list[Result]:
-    if not settings.asana_enabled:
-        # A deliberate choice, not a missing credential. Reporting it as a
-        # failure would train you to ignore a red line in this table.
-        return [
-            Result(
-                "Asana",
-                SKIP,
-                "ASANA_ENABLED is false — the WBS is built and stored, but not published",
-            )
-        ]
-    if not settings.asana_access_token:
-        return [missing("Asana", "ASANA_ACCESS_TOKEN")]
-
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT, headers=_asana_headers()) as client:
-            r = await client.get(f"{ASANA}/users/me", params={"opt_fields": "name,workspaces.name"})
-            if r.status_code != 200:
-                return [
-                    Result(
-                        "Asana",
-                        FAIL,
-                        f"HTTP {r.status_code}: {_body(r)}",
-                        "Generate a personal access token at https://app.asana.com/0/my-apps",
-                    )
-                ]
-            me = r.json()["data"]
-    except Exception as exc:  # noqa: BLE001
-        return [Result("Asana", FAIL, _short(exc))]
-
-    workspaces = me.get("workspaces", [])
-    results = [
-        Result(
-            "Asana",
-            PASS,
-            f"{me.get('name')} — {len(workspaces)} workspace(s)",
-        )
-    ]
-
-    if not settings.asana_workspace_gid:
-        listing = ", ".join(f"{w['name']}={w['gid']}" for w in workspaces) or "none found"
-        results.append(
-            Result(
-                "Asana workspace",
-                WARN,
-                "ASANA_WORKSPACE_GID is not set",
-                f"Pick one and add it to .env — {listing}",
-            )
-        )
-        return results
-
-    gids = {w["gid"] for w in workspaces}
-    if settings.asana_workspace_gid not in gids:
-        results.append(
-            Result(
-                "Asana workspace",
-                FAIL,
-                f"{settings.asana_workspace_gid} is not a workspace this token can see",
-                ", ".join(f"{w['name']}={w['gid']}" for w in workspaces),
-            )
-        )
-        return results
-
-    name = next(w["name"] for w in workspaces if w["gid"] == settings.asana_workspace_gid)
-    results.append(Result("Asana workspace", PASS, name))
-
-    if deep:
-        results.append(await _check_asana_dependencies())
-    else:
-        results.append(
-            Result(
-                "Asana dependencies",
-                SKIP,
-                "not verified",
-                "Run `make check ARGS=--deep` once — dependencies need a paid tier "
-                "and this is the only way to know before you build the WBS stage",
-            )
-        )
-    return results
-
-
-async def _check_asana_dependencies() -> Result:
-    """Create a throwaway project, link two tasks, delete it.
-
-    Anything short of actually calling addDependencies can't distinguish a free
-    workspace from a paid one.
-    """
-    project_gid: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT, headers=_asana_headers()) as client:
-            r = await client.post(
-                f"{ASANA}/projects",
-                json={
-                    "data": {
-                        "name": "pm-fyp credential check (safe to delete)",
-                        "workspace": settings.asana_workspace_gid,
-                    }
-                },
-            )
-            if r.status_code >= 300:
-                return Result(
-                    "Asana dependencies",
-                    FAIL,
-                    f"could not create a test project: {_body(r)}",
-                    "The token needs permission to create projects in this workspace",
-                )
-            project_gid = r.json()["data"]["gid"]
-
-            task_gids = []
-            for label in ("A", "B"):
-                tr = await client.post(
-                    f"{ASANA}/tasks",
-                    json={
-                        "data": {
-                            "name": f"check task {label}",
-                            "projects": [project_gid],
-                            "workspace": settings.asana_workspace_gid,
-                        }
-                    },
-                )
-                if tr.status_code >= 300:
-                    return Result("Asana dependencies", FAIL, f"task create failed: {_body(tr)}")
-                task_gids.append(tr.json()["data"]["gid"])
-
-            dr = await client.post(
-                f"{ASANA}/tasks/{task_gids[1]}/addDependencies",
-                json={"data": {"dependencies": [task_gids[0]]}},
-            )
-            if dr.status_code < 300:
-                return Result(
-                    "Asana dependencies", PASS, "task dependencies work in this workspace"
-                )
-
-            return Result(
-                "Asana dependencies",
-                FAIL,
-                f"HTTP {dr.status_code}: {_body(dr)}",
-                "Task dependencies need Asana Premium/Advanced. Start the 30-day trial "
-                "now so it covers your submission, or fall back to rendering the "
-                "dependency graph only in the dashboard.",
-            )
-    except Exception as exc:  # noqa: BLE001
-        return Result("Asana dependencies", FAIL, _short(exc))
-    finally:
-        if project_gid:
-            try:
-                async with httpx.AsyncClient(timeout=TIMEOUT, headers=_asana_headers()) as client:
-                    await client.delete(f"{ASANA}/projects/{project_gid}")
-            except Exception:  # noqa: BLE001 - cleanup is best effort
-                pass
-
-
-# --------------------------------------------------------------------------
-# GitHub
-# --------------------------------------------------------------------------
-async def check_github() -> list[Result]:
-    if not settings.github_token:
-        return [missing("GitHub", "GITHUB_TOKEN")]
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.get(
-                "https://api.github.com/user",
-                headers={
-                    "Authorization": f"Bearer {settings.github_token}",
-                    "Accept": "application/vnd.github+json",
-                },
-            )
-        if r.status_code != 200:
-            return [
-                Result(
-                    "GitHub",
-                    FAIL,
-                    f"HTTP {r.status_code}: {_body(r)}",
-                    "Create a fine-grained PAT with Administration and Contents "
-                    "read/write at https://github.com/settings/personal-access-tokens",
-                )
-            ]
-        login = r.json().get("login")
-        results = [Result("GitHub", PASS, f"authenticated as {login}")]
-        owner = settings.github_owner or login
-        if not settings.github_owner:
-            results.append(
-                Result(
-                    "GitHub owner",
-                    WARN,
-                    "GITHUB_OWNER is not set",
-                    f"Generated repos will default to {login}; set it explicitly to be sure",
-                )
-            )
-        else:
-            results.append(Result("GitHub owner", PASS, f"repos will be created under {owner}"))
-        return results
-    except Exception as exc:  # noqa: BLE001
-        return [Result("GitHub", FAIL, _short(exc))]
-
-
-# --------------------------------------------------------------------------
-# Vercel
-# --------------------------------------------------------------------------
-async def check_vercel() -> Result:
-    if not settings.vercel_token:
-        return missing("Vercel", "VERCEL_TOKEN")
-    try:
-        params = {"teamId": settings.vercel_team_id} if settings.vercel_team_id else None
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.get(
-                "https://api.vercel.com/v2/user",
-                headers={"Authorization": f"Bearer {settings.vercel_token}"},
-                params=params,
-            )
-        if r.status_code != 200:
-            return Result(
-                "Vercel",
-                FAIL,
-                f"HTTP {r.status_code}: {_body(r)}",
-                "Create a token at https://vercel.com/account/tokens",
-            )
-        user = r.json().get("user", {})
-        return Result(
-            "Vercel", PASS, f"authenticated as {user.get('username') or user.get('email')}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        return Result("Vercel", FAIL, _short(exc))
-
-
-# --------------------------------------------------------------------------
 # Database
 # --------------------------------------------------------------------------
 async def check_database() -> Result:
@@ -448,34 +210,15 @@ def render(results: list[Result]) -> None:
 
 
 async def main() -> int:
-    deep = "--deep" in sys.argv
+    print("\n  pm-fyp credential check (Phase 1: Gemini, Slack, database)")
 
-    print("\n  pm-fyp credential check" + ("  (deep)" if deep else ""))
-
-    (
-        gemini_result,
-        slack_results,
-        asana_results,
-        github_results,
-        vercel_result,
-        db_result,
-    ) = await asyncio.gather(
+    gemini_result, slack_results, db_result = await asyncio.gather(
         check_gemini(),
         check_slack(),
-        check_asana(deep),
-        check_github(),
-        check_vercel(),
         check_database(),
     )
 
-    results = [
-        gemini_result,
-        *slack_results,
-        *asana_results,
-        *github_results,
-        vercel_result,
-        db_result,
-    ]
+    results = [gemini_result, *slack_results, db_result]
     render(results)
     return 1 if any(r.status == FAIL for r in results) else 0
 

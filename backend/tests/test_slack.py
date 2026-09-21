@@ -11,11 +11,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
 
 from app.integrations import slack
-from app.models import Run, RunStatus, SlackMessage, StageKind, StageStatus
-from app.orchestrator import engine
+from app.orchestrator import engine, store
+from app.orchestrator.state import RunStatus, Stage, StageKind, StageStatus
 
 
 class FakeClient:
@@ -42,20 +41,7 @@ class FakeClient:
 
 
 @pytest.fixture(autouse=True)
-def use_test_session(session, monkeypatch):
-    """Point the module's session factory at the test database."""
-
-    class _Factory:
-        def __call__(self):
-            return self
-
-        async def __aenter__(self):
-            return session
-
-        async def __aexit__(self, *exc):
-            return False
-
-    monkeypatch.setattr(slack, "SessionLocal", _Factory())
+def _reset_name_cache(monkeypatch):
     monkeypatch.setattr(slack, "_NAME_CACHE", {})
 
 
@@ -68,39 +54,39 @@ def _event(**overrides) -> dict:
     } | overrides
 
 
-async def test_captures_a_normal_message(session):
+async def test_captures_a_normal_message():
     client = FakeClient({"U1": "priya"})
 
     assert await slack.capture_message(_event(), client) is True
 
-    stored = (await session.execute(select(SlackMessage))).scalars().all()
+    stored = store.messages_for("C123", None)
     assert len(stored) == 1
     assert stored[0].user_name == "priya"
     assert stored[0].text.startswith("We need a booking system")
 
 
-async def test_ignores_the_agents_own_posts(session):
+async def test_ignores_the_agents_own_posts():
     """Otherwise the agent's plans become requirements on the next run."""
     client = FakeClient()
 
     assert await slack.capture_message(_event(bot_id="B1"), client) is False
     assert await slack.capture_message(_event(subtype="bot_message"), client) is False
 
-    assert (await session.execute(select(SlackMessage))).scalars().all() == []
+    assert store.messages_for("C123", None) == []
 
 
 @pytest.mark.parametrize("subtype", ["channel_join", "message_changed", "message_deleted"])
-async def test_ignores_non_conversation_subtypes(session, subtype):
+async def test_ignores_non_conversation_subtypes(subtype):
     client = FakeClient()
     assert await slack.capture_message(_event(subtype=subtype), client) is False
 
 
-async def test_ignores_empty_messages(session):
+async def test_ignores_empty_messages():
     client = FakeClient()
     assert await slack.capture_message(_event(text="   "), client) is False
 
 
-async def test_redelivered_messages_are_not_stored_twice(session):
+async def test_redelivered_messages_are_not_stored_twice():
     """Slack redelivers events; the transcript must not double-count them."""
     client = FakeClient({"U1": "priya"})
     event = _event()
@@ -108,20 +94,19 @@ async def test_redelivered_messages_are_not_stored_twice(session):
     assert await slack.capture_message(event, client) is True
     assert await slack.capture_message(event, client) is False
 
-    stored = (await session.execute(select(SlackMessage))).scalars().all()
-    assert len(stored) == 1
+    assert len(store.messages_for("C123", None)) == 1
 
 
-async def test_thread_messages_keep_their_thread(session):
+async def test_thread_messages_keep_their_thread():
     client = FakeClient({"U1": "priya"})
 
     await slack.capture_message(_event(thread_ts="1699999999.000000"), client)
 
-    stored = (await session.execute(select(SlackMessage))).scalars().one()
+    stored = store.messages_for("C123", None)[0]
     assert stored.thread_ts == "1699999999.000000"
 
 
-async def test_user_names_are_resolved_once(session):
+async def test_user_names_are_resolved_once():
     """users.info is rate-limited and the same people speak throughout."""
     client = FakeClient({"U1": "priya"})
 
@@ -131,21 +116,21 @@ async def test_user_names_are_resolved_once(session):
     assert client.users_info_calls == 1
 
 
-async def test_an_unresolvable_user_still_captures_the_message(session):
+async def test_an_unresolvable_user_still_captures_the_message():
     """A missing name must not lose the content."""
     client = FakeClient(names={})
 
     assert await slack.capture_message(_event(user="U-unknown"), client) is True
 
-    stored = (await session.execute(select(SlackMessage))).scalars().one()
+    stored = store.messages_for("C123", None)[0]
     assert stored.user_name == "U-unknown"
 
 
 # --- reporting -------------------------------------------------------------
 
 
-async def test_describe_reports_a_failure_with_its_cause(session):
-    run = await engine.create_run(session, title="Campus Booking")
+async def test_describe_reports_a_failure_with_its_cause():
+    run = await engine.create_run(title="Campus Booking")
     stage = next(s for s in run.stages if s.kind.value == "INGEST")
     stage.status = StageStatus.FAILED
     stage.error = "There is barely any conversation here (12 characters)."
@@ -157,8 +142,8 @@ async def test_describe_reports_a_failure_with_its_cause(session):
     assert "barely any conversation" in text
 
 
-async def test_describe_asks_for_review_when_gated(session):
-    run = await engine.create_run(session, title="Campus Booking")
+async def test_describe_asks_for_review_when_gated():
+    run = await engine.create_run(title="Campus Booking")
     next(s for s in run.stages if s.kind.value == "INGEST").status = StageStatus.COMPLETE
     next(s for s in run.stages if s.kind.value == "PLAN").status = StageStatus.AWAITING_APPROVAL
 
@@ -166,11 +151,11 @@ async def test_describe_asks_for_review_when_gated(session):
 
     assert "PLAN" in text
     assert "ready for your review" in text
-    assert "1 of 6 stages complete" in text
+    assert "1 of 2 stages complete" in text
 
 
-async def test_describe_lists_artifacts_when_finished(session):
-    run = await engine.create_run(session, title="Campus Booking")
+async def test_describe_lists_artifacts_when_finished():
+    run = await engine.create_run(title="Campus Booking")
     run.status = RunStatus.COMPLETE
     run.asana_project_url = "https://app.asana.com/0/1/2"
     run.vercel_url = "https://demo.vercel.app"
@@ -184,11 +169,10 @@ async def test_describe_lists_artifacts_when_finished(session):
     assert "GitHub" not in text
 
 
-async def test_starting_a_second_run_in_the_same_channel_is_refused(session, monkeypatch):
+async def test_starting_a_second_run_in_the_same_channel_is_refused():
     """Two concurrent runs would both claim the same conversation."""
-    run = await engine.create_run(session, slack_channel_id="C123")
+    run = await engine.create_run(slack_channel_id="C123")
     run.status = RunStatus.RUNNING
-    await session.commit()
 
     client = FakeClient()
     await slack._start("C123", None, {"user_name": "priya"}, client)
@@ -196,10 +180,10 @@ async def test_starting_a_second_run_in_the_same_channel_is_refused(session, mon
     assert len(client.posted) == 1
     assert "already in progress" in client.posted[0]["text"]
     # No second run was created.
-    assert len((await session.execute(select(Run))).scalars().all()) == 1
+    assert len(store.list_runs()) == 1
 
 
-async def test_status_with_no_run_says_so(session):
+async def test_status_with_no_run_says_so():
     client = FakeClient()
     await slack._status("C-empty", None, client)
     assert "No runs here yet" in client.posted[0]["text"]
@@ -227,7 +211,7 @@ def test_an_unknown_failure_still_shows_the_error():
     assert "something obscure" in text
 
 
-async def test_a_failing_command_reports_into_slack_instead_of_timing_out(session, monkeypatch):
+async def test_a_failing_command_reports_into_slack_instead_of_timing_out(monkeypatch):
     """Otherwise the user sees Slack's generic 'app did not respond' and nothing else."""
     registered = {}
 
@@ -290,23 +274,21 @@ class RefusingClient(FakeClient):
         raise SlackApiError("not_in_channel", {"ok": False, "error": "not_in_channel"})
 
 
-async def test_posting_without_membership_raises_rather_than_logging(session):
+async def test_posting_without_membership_raises_rather_than_logging():
     """The user never reads the log, so this failure must not be swallowed."""
     with pytest.raises(slack.NotInChannel):
         await slack.post(RefusingClient(), "C1", "hello")
 
 
-async def test_no_run_is_created_when_the_bot_cannot_post(session):
+async def test_no_run_is_created_when_the_bot_cannot_post():
     """A junk failed run for a problem that is not the run's."""
-    from sqlalchemy import select as _select
-
     with pytest.raises(slack.NotInChannel):
         await slack._start("C1", None, {"user_name": "priya"}, RefusingClient())
 
-    assert (await session.execute(_select(Run))).scalars().all() == []
+    assert store.list_runs() == []
 
 
-async def test_the_invite_instruction_reaches_the_user_privately(session, monkeypatch):
+async def test_the_invite_instruction_reaches_the_user_privately():
     """chat.postMessage cannot work here, so the reply goes over response_url."""
     registered = {}
 
@@ -351,36 +333,39 @@ async def test_the_invite_instruction_reaches_the_user_privately(session, monkey
     assert "/invite @PM Agent" in responded[0]
 
 
-async def test_an_empty_channel_explains_itself_before_running(session):
+async def test_an_empty_channel_explains_itself_before_running():
     """Better than letting INGEST fail with the same diagnosis a minute later."""
     client = FakeClient()
     await slack._start("C-empty", None, {"user_name": "priya"}, client)
 
     assert "have not seen any conversation" in client.posted[0]["text"]
-    from sqlalchemy import select as _select
-
-    assert (await session.execute(_select(Run))).scalars().all() == []
+    assert store.list_runs() == []
 
 
 # --- progress reporting through a long run ---------------------------------
 
 
-async def test_each_completed_stage_is_narrated_into_the_channel(session, monkeypatch):
+async def test_each_completed_stage_is_narrated_into_the_channel(monkeypatch):
     """A full run takes minutes; silence in the channel looks like a crash."""
-    from app.integrations import slack as slack_module
-
     posted: list[str] = []
 
     async def _post(client, channel, text, thread_ts=None):
         posted.append(text)
 
-    monkeypatch.setattr(slack_module, "post", _post)
+    monkeypatch.setattr(slack, "post", _post)
 
-    run = await engine.create_run(session, title="Campus")
-    reporter = slack_module._progress_reporter(client=None, channel="C1", thread_ts=None)
+    run = await engine.create_run(title="Campus")
+    reporter = slack._progress_reporter(client=None, channel="C1", thread_ts=None)
 
-    for kind in (StageKind.INGEST, StageKind.PLAN, StageKind.WBS):
-        stage = next(s for s in run.stages if s.kind == kind)
+    stages = [
+        next(s for s in run.stages if s.kind == kind)
+        for kind in (StageKind.INGEST, StageKind.PLAN)
+    ]
+    # WBS is not part of a Phase 1 run's stages, but the narration code path for
+    # it still exists for a later phase — exercise it with a synthetic stage.
+    stages.append(Stage(kind=StageKind.WBS, position=99))
+
+    for stage in stages:
         stage.status = StageStatus.COMPLETE
         await reporter(run, stage)
 
@@ -389,27 +374,24 @@ async def test_each_completed_stage_is_narrated_into_the_channel(session, monkey
     assert "Asana" in posted[2]
 
 
-async def test_a_failed_stage_is_not_narrated_twice(session, monkeypatch):
+async def test_a_failed_stage_is_not_narrated_twice(monkeypatch):
     """The failure is reported once, by the caller, with the actual error."""
-    from app.integrations import slack as slack_module
-
     posted: list[str] = []
 
     async def _post(client, channel, text, thread_ts=None):
         posted.append(text)
 
-    monkeypatch.setattr(slack_module, "post", _post)
+    monkeypatch.setattr(slack, "post", _post)
 
-    run = await engine.create_run(session, title="Campus")
-    stage = next(s for s in run.stages if s.kind == StageKind.WBS)
-    stage.status = StageStatus.FAILED
+    run = await engine.create_run(title="Campus")
+    stage = Stage(kind=StageKind.WBS, position=99, status=StageStatus.FAILED)
 
-    await slack_module._progress_reporter(client=None, channel="C1", thread_ts=None)(run, stage)
+    await slack._progress_reporter(client=None, channel="C1", thread_ts=None)(run, stage)
 
     assert posted == []
 
 
-async def test_a_broken_reporter_cannot_fail_the_run(session):
+async def test_a_broken_reporter_cannot_fail_the_run():
     """Reporting is a courtesy; it must never take a run down with it."""
 
     async def _explode(run, stage):
@@ -423,14 +405,12 @@ async def test_a_broken_reporter_cannot_fail_the_run(session):
 
             return StageResult(summary="fine")
 
-    from app.orchestrator import engine as engine_module
-
-    original = engine_module.REGISTRY
-    engine_module.REGISTRY = {StageKind.INGEST: _Fine()}
+    original = engine.REGISTRY
+    engine.REGISTRY = {StageKind.INGEST: _Fine()}
     try:
-        run = await engine.create_run(session, title="Campus")
-        run = await engine.advance(session, run.id, on_stage=_explode)
+        run = await engine.create_run(title="Campus")
+        run = await engine.advance(run.id, on_stage=_explode)
     finally:
-        engine_module.REGISTRY = original
+        engine.REGISTRY = original
 
     assert next(s for s in run.stages if s.kind == StageKind.INGEST).status == StageStatus.COMPLETE

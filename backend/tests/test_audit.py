@@ -9,14 +9,13 @@ from __future__ import annotations
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
 
 from app import audit
 from app.integrations.http import request_json
 from app.llm.client import LLMResult
-from app.models import AuditLog, StageKind, StageStatus
 from app.orchestrator import engine
 from app.orchestrator.base import StageFailed, StageResult
+from app.orchestrator.state import StageKind, StageStatus
 
 
 def test_recording_outside_a_collector_is_a_no_op():
@@ -99,35 +98,29 @@ class _CallingStage:
         return StageResult(summary="done")
 
 
-async def _audit_rows(session, run_id):
-    result = await session.execute(select(AuditLog).where(AuditLog.run_id == run_id))
-    return list(result.scalars())
-
-
-async def test_the_engine_persists_what_a_stage_called(session, monkeypatch):
+async def test_the_engine_records_what_a_stage_called(monkeypatch):
     monkeypatch.setattr(engine, "REGISTRY", {StageKind.INGEST: _CallingStage()})
-    run = await engine.create_run(session, title="Audited")
+    run = await engine.create_run(title="Audited")
 
-    await engine.advance(session, run.id)
+    await engine.advance(run.id)
 
-    rows = await _audit_rows(session, run.id)
+    rows = run.audit
     assert {row.kind for row in rows} == {"llm", "api"}
     llm = next(row for row in rows if row.kind == "llm")
     assert (llm.input_tokens, llm.output_tokens) == (100, 250)
     assert llm.detail["schema"] == "Requirements"
-    assert all(row.stage_id is not None for row in rows), "rows must attribute to a stage"
 
 
-async def test_calls_made_before_a_stage_failed_are_still_recorded(session, monkeypatch):
+async def test_calls_made_before_a_stage_failed_are_still_recorded(monkeypatch):
     """A failed stage is exactly when the call log is worth having."""
     monkeypatch.setattr(engine, "REGISTRY", {StageKind.INGEST: _CallingStage(fail=True)})
-    run = await engine.create_run(session, title="Audited")
+    run = await engine.create_run(title="Audited")
 
-    run = await engine.advance(session, run.id)
+    run = await engine.advance(run.id)
 
     stage = next(s for s in run.stages if s.kind == StageKind.INGEST)
     assert stage.status == StageStatus.FAILED
-    assert len(await _audit_rows(session, run.id)) == 2
+    assert len(run.audit) == 2
 
 
 async def test_the_llm_client_records_its_own_calls(monkeypatch):
@@ -180,7 +173,7 @@ def test_llm_result_stays_the_source_of_truth_for_stage_tokens():
     assert (result.input_tokens, result.output_tokens) == (1, 2)
 
 
-async def test_a_failed_stage_still_reports_what_it_spent(session, monkeypatch):
+async def test_a_failed_stage_still_reports_what_it_spent(monkeypatch):
     """A stage that fails on its second model call still paid for the first."""
 
     class _SpendsThenFails:
@@ -196,9 +189,9 @@ async def test_a_failed_stage_still_reports_what_it_spent(session, monkeypatch):
             raise StageFailed("the external API rejected the result")
 
     monkeypatch.setattr(engine, "REGISTRY", {StageKind.INGEST: _SpendsThenFails()})
-    run = await engine.create_run(session, title="Expensive failure")
+    run = await engine.create_run(title="Expensive failure")
 
-    run = await engine.advance(session, run.id)
+    run = await engine.advance(run.id)
 
     stage = next(s for s in run.stages if s.kind == StageKind.INGEST)
     assert stage.status == StageStatus.FAILED

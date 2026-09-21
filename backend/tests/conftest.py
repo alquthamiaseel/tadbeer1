@@ -1,30 +1,24 @@
 """Test fixtures.
 
-Tests run against a real SQLite database rather than mocked sessions. The
-engine's whole job is persisting state correctly — resumability, versioned
-artifacts, status transitions — and a mocked session would verify none of it.
+Pipeline state is in-memory now (see app.orchestrator.store), so tests reset
+that store rather than spinning up a database — the engine's job is now
+correct state transitions on plain Python objects, not persistence.
 """
 
 from __future__ import annotations
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.db import Base
-from app.models import SlackMessage
+from app.orchestrator import store
+from app.orchestrator.state import SlackMessage
 
 
-@pytest.fixture
-async def session() -> AsyncSession:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with maker() as s:
-        yield s
-
-    await engine.dispose()
+@pytest.fixture(autouse=True)
+def _reset_store():
+    """Every test starts with an empty run/message registry."""
+    store.reset()
+    yield
+    store.reset()
 
 
 CONVERSATION = [
@@ -38,7 +32,7 @@ CONVERSATION = [
 
 
 @pytest.fixture
-async def conversation(session: AsyncSession) -> list[SlackMessage]:
+def conversation() -> list[SlackMessage]:
     """A realistic stakeholder conversation captured in a channel."""
     messages = [
         SlackMessage(
@@ -51,6 +45,6 @@ async def conversation(session: AsyncSession) -> list[SlackMessage]:
         )
         for index, (name, text) in enumerate(CONVERSATION)
     ]
-    session.add_all(messages)
-    await session.commit()
+    for message in messages:
+        store.capture_message(message)
     return messages

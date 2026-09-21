@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 
 from app.llm.client import LLMResult
-from app.models import Artifact, ArtifactKind, RunStatus, StageKind, StageStatus
 from app.orchestrator import engine
 from app.orchestrator.base import StageContext
 from app.orchestrator.stages.plan import PlanStage
+from app.orchestrator.state import Artifact, ArtifactKind, RunStatus, StageKind, StageStatus
 from app.schemas.plan import Milestone, PlanPhase, ProjectPlan, Risk
 
 PLAN = ProjectPlan(
@@ -72,30 +72,25 @@ def fake_llm(monkeypatch):
     return captured
 
 
-async def _ready_run(session):
-    run = await engine.create_run(session, title="Campus Event Booking")
+async def _ready_run():
+    run = await engine.create_run(title="Campus Event Booking")
     ingest = next(stage for stage in run.stages if stage.kind == StageKind.INGEST)
     ingest.status = StageStatus.COMPLETE
-    session.add(
+    run.artifacts.append(
         Artifact(
-            run_id=run.id,
-            stage_id=ingest.id,
             kind=ArtifactKind.REQUIREMENTS,
             name="Requirements",
             version=1,
             data={"project_name": "Campus Event Booking", "features": [{"title": "Reserve seat"}]},
         )
     )
-    await session.commit()
-    loaded = await engine.load_run(session, run.id)
-    assert loaded is not None
-    return loaded
+    return run
 
 
-async def test_plan_uses_the_requirements_artifact(session, fake_llm):
-    run = await _ready_run(session)
+async def test_plan_uses_the_requirements_artifact(fake_llm):
+    run = await _ready_run()
 
-    result = await PlanStage().run(StageContext(run=run, session=session))
+    result = await PlanStage().run(StageContext(run=run))
 
     assert result.artifacts[0].kind == ArtifactKind.PLAN
     assert result.artifacts[0].data["estimated_total_days"] == 13
@@ -104,22 +99,22 @@ async def test_plan_uses_the_requirements_artifact(session, fake_llm):
     assert "2 phases" in result.summary
 
 
-async def test_feedback_is_given_to_the_revision(session, fake_llm):
-    run = await _ready_run(session)
+async def test_feedback_is_given_to_the_revision(fake_llm):
+    run = await _ready_run()
 
     await PlanStage().run(
-        StageContext(run=run, session=session, feedback="Include a pilot before delivery")
+        StageContext(run=run, feedback="Include a pilot before delivery")
     )
 
     assert "Include a pilot before delivery" in fake_llm["user"]
     assert "rejected the previous plan" in fake_llm["user"]
 
 
-async def test_engine_stores_plan_and_waits_for_human_approval(session, fake_llm, monkeypatch):
-    run = await _ready_run(session)
+async def test_engine_stores_plan_and_waits_for_human_approval(fake_llm, monkeypatch):
+    run = await _ready_run()
     monkeypatch.setattr(engine, "REGISTRY", {StageKind.PLAN: PlanStage()})
 
-    run = await engine.advance(session, run.id)
+    run = await engine.advance(run.id)
 
     plan = next(stage for stage in run.stages if stage.kind == StageKind.PLAN)
     assert plan.status == StageStatus.AWAITING_APPROVAL

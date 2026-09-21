@@ -29,23 +29,10 @@ import uuid
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.errors import SlackApiError
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.db import SessionLocal
-from app.models import (
-    Approval,
-    ApprovalDecision,
-    ArtifactKind,
-    Run,
-    RunStatus,
-    SlackMessage,
-    Stage,
-    StageKind,
-    StageStatus,
-)
-from app.orchestrator import engine
+from app.orchestrator import engine, store
+from app.orchestrator.state import ArtifactKind, Run, SlackMessage, StageKind, StageStatus
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +103,7 @@ async def resolve_user_name(client, user_id: str | None) -> str | None:
 
 
 async def capture_message(event: dict, client) -> bool:
-    """Persist one Slack message. Returns False if it was ignored or a duplicate."""
+    """Store one Slack message. Returns False if it was ignored or a duplicate."""
     if event.get("subtype") in IGNORED_SUBTYPES or event.get("bot_id"):
         return False
 
@@ -126,26 +113,17 @@ async def capture_message(event: dict, client) -> bool:
 
     name = await resolve_user_name(client, event.get("user"))
 
-    async with SessionLocal() as session:
-        session.add(
-            SlackMessage(
-                channel_id=event["channel"],
-                ts=event["ts"],
-                thread_ts=event.get("thread_ts"),
-                user_id=event.get("user"),
-                user_name=name,
-                text=text,
-                is_bot=False,
-            )
+    return store.capture_message(
+        SlackMessage(
+            channel_id=event["channel"],
+            ts=event["ts"],
+            thread_ts=event.get("thread_ts"),
+            user_id=event.get("user"),
+            user_name=name,
+            text=text,
+            is_bot=False,
         )
-        try:
-            await session.commit()
-        except IntegrityError:
-            # Slack redelivers events; (channel, ts) is unique, so this is the
-            # same message arriving twice rather than an error.
-            await session.rollback()
-            return False
-    return True
+    )
 
 
 class NotInChannel(RuntimeError):
@@ -225,13 +203,7 @@ def explain_failure(exc: Exception) -> str:
 
 async def active_run(channel_id: str, thread_ts: str | None) -> Run | None:
     """The most recent run for this conversation, if any."""
-    async with SessionLocal() as session:
-        query = select(Run).where(Run.slack_channel_id == channel_id)
-        if thread_ts:
-            query = query.where(Run.slack_thread_ts == thread_ts)
-        query = query.order_by(Run.created_at.desc()).limit(1)
-        result = await session.execute(query)
-        return result.scalar_one_or_none()
+    return store.active_run(channel_id, thread_ts)
 
 
 #: What each stage is doing, posted as it finishes. A full run takes minutes,
@@ -249,7 +221,7 @@ STAGE_DONE = {
 def _progress_reporter(client, channel: str, thread_ts: str | None):
     """An engine observer that narrates each completed stage into the channel."""
 
-    async def report(run: Run, stage: Stage) -> None:
+    async def report(run: Run, stage) -> None:
         if stage.status == StageStatus.FAILED:
             return  # the failure itself is reported once, by the caller
         note = STAGE_DONE.get(stage.kind)
@@ -264,18 +236,16 @@ async def _revise_plan(
 ) -> None:
     """Re-run PLAN with the reviewer's feedback and post the revision for review."""
     try:
-        async with SessionLocal() as session:
-            run = await engine.request_changes(
-                session,
-                run_id,
-                StageKind.PLAN,
-                feedback,
-                on_stage=_progress_reporter(client, channel, thread_ts),
-            )
-            if _awaiting_plan_approval(run):
-                await post_plan_approval(client, channel, run, thread_ts)
-                return
-            message = describe(run)
+        run = await engine.request_changes(
+            run_id,
+            StageKind.PLAN,
+            feedback,
+            on_stage=_progress_reporter(client, channel, thread_ts),
+        )
+        if _awaiting_plan_approval(run):
+            await post_plan_approval(client, channel, run, thread_ts)
+            return
+        message = describe(run)
     except Exception as exc:  # noqa: BLE001 - the user must hear about any failure
         log.exception("revising the plan for run %s failed", run_id)
         message = explain_failure(exc)
@@ -290,14 +260,11 @@ async def run_pipeline(run_id: uuid.UUID, channel: str, thread_ts: str | None, c
     a pipeline takes minutes and Slack gives a slash command three seconds.
     """
     try:
-        async with SessionLocal() as session:
-            run = await engine.advance(
-                session, run_id, on_stage=_progress_reporter(client, channel, thread_ts)
-            )
-            if _awaiting_plan_approval(run):
-                await post_plan_approval(client, channel, run, thread_ts)
-                return
-            message = describe(run)
+        run = await engine.advance(run_id, on_stage=_progress_reporter(client, channel, thread_ts))
+        if _awaiting_plan_approval(run):
+            await post_plan_approval(client, channel, run, thread_ts)
+            return
+        message = describe(run)
     except Exception as exc:  # noqa: BLE001 - the user must hear about any failure
         log.exception("run %s failed", run_id)
         message = explain_failure(exc)
@@ -402,7 +369,7 @@ def describe(run: Run) -> str:
             f"_{len(done)} of {len(run.stages)} stages complete._"
         )
 
-    if run.status == RunStatus.COMPLETE:
+    if run.status.value == "COMPLETE":
         links = [
             f"• <{url}|{label}>"
             for label, url in (
@@ -447,26 +414,14 @@ def register(app: AsyncApp) -> None:
         run_id = uuid.UUID(payload["run_id"])
         user = body.get("user", {}).get("username") or body.get("user", {}).get("id")
         channel = body["channel"]["id"]
-        message_ts = body.get("message", {}).get("ts")
         try:
-            async with SessionLocal() as session:
-                run = await engine.load_run(session, run_id)
-                if run is None:
-                    raise ValueError("This plan run no longer exists.")
-                stage = next(stage for stage in run.stages if stage.kind == StageKind.PLAN)
-                session.add(
-                    Approval(
-                        run_id=run.id,
-                        stage_id=stage.id,
-                        decision=ApprovalDecision.APPROVED,
-                        decided_by=user,
-                        slack_message_ts=message_ts,
-                    )
-                )
-                await session.commit()
-                run = await engine.mark_stage_approved(session, run.id, StageKind.PLAN)
-                thread_ts = run.slack_thread_ts
-                title = run.title
+            run = await engine.load_run(run_id)
+            if run is None:
+                raise ValueError("This plan run no longer exists.")
+            log.info("run %s plan approved by %s", run_id, user)
+            run = await engine.mark_stage_approved(run.id, StageKind.PLAN)
+            thread_ts = run.slack_thread_ts
+            title = run.title
             await post(client, channel, f":white_check_mark: *{title}* plan approved by {user}.")
             # The remaining four stages take minutes. Continue in the background
             # so the button does not sit spinning while Asana and Vercel work.
@@ -516,23 +471,12 @@ def register(app: AsyncApp) -> None:
         feedback = body["view"]["state"]["values"]["feedback_block"]["feedback"]["value"].strip()
         user = body.get("user", {}).get("username") or body.get("user", {}).get("id")
         try:
-            async with SessionLocal() as session:
-                run = await engine.load_run(session, run_id)
-                if run is None:
-                    raise ValueError("This plan run no longer exists.")
-                stage = next(stage for stage in run.stages if stage.kind == StageKind.PLAN)
-                session.add(
-                    Approval(
-                        run_id=run.id,
-                        stage_id=stage.id,
-                        decision=ApprovalDecision.CHANGES_REQUESTED,
-                        feedback=feedback,
-                        decided_by=user,
-                    )
-                )
-                await session.commit()
-                channel = run.slack_channel_id
-                thread_ts = run.slack_thread_ts
+            run = await engine.load_run(run_id)
+            if run is None:
+                raise ValueError("This plan run no longer exists.")
+            log.info("run %s plan changes requested by %s", run_id, user)
+            channel = run.slack_channel_id
+            thread_ts = run.slack_thread_ts
             if not channel:
                 raise ValueError("This run has no Slack channel.")
             await post(
@@ -542,11 +486,11 @@ def register(app: AsyncApp) -> None:
                 thread_ts,
             )
             asyncio.create_task(_revise_plan(run_id, channel, thread_ts, feedback, client))
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("plan feedback submission failed")
             # A modal has no durable response destination. A best-effort DM is
-            # overkill for v1; write the error to the log and retain DB state.
-            raise exc
+            # overkill for v1; the error is logged and the run state is retained.
+            raise
 
     @app.command("/pm")
     async def on_command(ack, command, client, respond):
@@ -561,10 +505,9 @@ def register(app: AsyncApp) -> None:
 
         # Every command reports its own failure into the channel. Without this,
         # an exception here reaches the user as Slack's generic "the app did not
-        # respond", which is indistinguishable whether the cause is a stopped
-        # database, exhausted model quota, or a bug — and says nothing about
-        # which. The listener must also survive: one bad command should not take
-        # the process down.
+        # respond", which is indistinguishable whether the cause is exhausted
+        # model quota or a bug — and says nothing about which. The listener must
+        # also survive: one bad command should not take the process down.
         try:
             if action == "start":
                 await _start(channel, thread_ts, command, client)
@@ -591,10 +534,7 @@ def register(app: AsyncApp) -> None:
 
 async def _start(channel: str, thread_ts: str | None, command: dict, client) -> None:
     existing = await active_run(channel, thread_ts)
-    if existing is not None and existing.status in (
-        RunStatus.RUNNING,
-        RunStatus.AWAITING_APPROVAL,
-    ):
+    if existing is not None and existing.status.value in ("RUNNING", "AWAITING_APPROVAL"):
         await post(
             client,
             channel,
@@ -604,11 +544,7 @@ async def _start(channel: str, thread_ts: str | None, command: dict, client) -> 
         )
         return
 
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(SlackMessage).where(SlackMessage.channel_id == channel)
-        )
-        message_count = len(result.scalars().all())
+    message_count = store.message_count(channel)
 
     if message_count == 0:
         # The bot only receives messages from channels it is in, so an empty
@@ -628,13 +564,11 @@ async def _start(channel: str, thread_ts: str | None, command: dict, client) -> 
         thread_ts,
     )
 
-    async with SessionLocal() as session:
-        run = await engine.create_run(
-            session,
-            slack_channel_id=channel,
-            slack_thread_ts=thread_ts,
-            started_by=command.get("user_name") or command.get("user_id"),
-        )
+    run = await engine.create_run(
+        slack_channel_id=channel,
+        slack_thread_ts=thread_ts,
+        started_by=command.get("user_name") or command.get("user_id"),
+    )
 
     # Detached: the command handler must return, the pipeline takes minutes.
     asyncio.create_task(run_pipeline(run.id, channel, thread_ts, client))
@@ -645,9 +579,7 @@ async def _status(channel: str, thread_ts: str | None, client) -> None:
     if run is None:
         await post(client, channel, "No runs here yet. Use `/pm start`.", thread_ts)
         return
-    async with SessionLocal() as session:
-        loaded = await engine.load_run(session, run.id)
-    await post(client, channel, describe(loaded), thread_ts)
+    await post(client, channel, describe(run), thread_ts)
 
 
 async def _cancel(channel: str, thread_ts: str | None, client) -> None:
@@ -655,11 +587,8 @@ async def _cancel(channel: str, thread_ts: str | None, client) -> None:
     if run is None:
         await post(client, channel, "There is no run here to cancel.", thread_ts)
         return
-    async with SessionLocal() as session:
-        loaded = await engine.load_run(session, run.id)
-        loaded.status = RunStatus.CANCELLED
-        await session.commit()
-    await post(client, channel, f"Cancelled *{loaded.title}*.", thread_ts)
+    run.status = run.status.__class__.CANCELLED
+    await post(client, channel, f"Cancelled *{run.title}*.", thread_ts)
 
 
 async def start_socket_mode() -> None:

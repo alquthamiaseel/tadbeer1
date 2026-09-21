@@ -56,10 +56,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://pmfyp:pmfyp@localhost:5433/pmfyp"
     api_host: str = "127.0.0.1"
     api_port: int = 8000
-    # Off by default: the API listens on localhost, where a password would only
-    # be a password to lose. Turn it on before putting the dashboard on a domain.
+    # Off by default: the API listens on localhost, where a login would only be
+    # a password to lose. Turn it on before putting the dashboard on a domain.
     dashboard_auth: bool = False
-    dashboard_password: str = "changeme"
+    # Signs session tokens issued at login. Must be set to a real secret before
+    # DASHBOARD_AUTH is turned on in anything but a local, single-user setup.
+    session_secret: str = "changeme-session-secret"
     log_level: str = "INFO"
 
     @property

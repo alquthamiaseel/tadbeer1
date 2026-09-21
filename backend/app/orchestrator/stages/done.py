@@ -9,8 +9,8 @@ free-tier quota exhausted.
 
 from __future__ import annotations
 
-from app.models import ArtifactKind, StageKind
 from app.orchestrator.base import ProducedArtifact, StageContext, StageResult
+from app.orchestrator.state import ArtifactKind, StageKind
 
 
 class DoneStage:

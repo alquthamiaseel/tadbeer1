@@ -1,9 +1,15 @@
-"""Replay a canned stakeholder conversation into the database.
+"""Replay a canned stakeholder conversation into the running backend.
 
 A demo should not depend on typing six messages into Slack correctly while
-someone watches. This writes the same conversation the pipeline would have
-captured, so ``/pm start`` in that channel has something to read — and so a
-rehearsal is repeatable rather than improvised.
+someone watches. This posts the same conversation the pipeline would have
+captured to the backend's dev-seed endpoint, so ``/pm start`` in that channel
+has something to read — and so a rehearsal is repeatable rather than
+improvised.
+
+Messages now live in memory inside the running API process (see
+``app.orchestrator.store``), so this has to talk to that process over HTTP
+rather than writing to a database — the backend must already be running
+(``make api``).
 
 Usage:
     python -m scripts.seed --channel C0123456789
@@ -16,10 +22,9 @@ import argparse
 import asyncio
 import sys
 
-from sqlalchemy import delete, select
+import httpx
 
-from app.db import SessionLocal
-from app.models import SlackMessage
+from app.config import settings
 
 #: A conversation with the properties the pipeline needs to show its work:
 #: two stakeholders who disagree slightly, a real constraint, a deadline, and
@@ -70,38 +75,50 @@ CONVERSATION: list[tuple[str, str]] = [
 ]
 
 
-async def seed(channel_id: str, *, reset: bool) -> int:
-    async with SessionLocal() as session:
-        if reset:
-            await session.execute(delete(SlackMessage).where(SlackMessage.channel_id == channel_id))
-            await session.commit()
+def _headers() -> dict[str, str]:
+    if not settings.dashboard_auth:
+        return {}
+    print("DASHBOARD_AUTH is on; pass a session token via API_TOKEN to seed the backend.")
+    import os
 
-        existing = await session.execute(
-            select(SlackMessage).where(SlackMessage.channel_id == channel_id)
+    token = os.environ.get("API_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+async def seed(channel_id: str, *, reset: bool, base_url: str) -> int:
+    messages = [
+        {
+            "channel_id": channel_id,
+            # Slack timestamps are "seconds.microseconds" strings and the
+            # transcript is ordered by them, so they must ascend.
+            "ts": f"{1740000000 + index * 60}.000100",
+            "user_id": f"USEED{index:02d}",
+            "user_name": name,
+            "text": text,
+        }
+        for index, (name, text) in enumerate(CONVERSATION)
+    ]
+
+    async with httpx.AsyncClient(base_url=base_url, timeout=10) as client:
+        response = await client.post(
+            "/api/dev/seed-messages",
+            json={"messages": messages, "reset": reset},
+            headers=_headers(),
         )
-        if existing.scalars().first() is not None:
-            print(
-                f"{channel_id} already has captured messages. "
-                "Pass --reset to replace them, or use a different channel."
-            )
+        if response.status_code != 200:
+            print(f"Could not seed the backend: {response.status_code} {response.text}")
+            print("Is it running? Start it with `make api`.")
             return 1
+        stored = response.json()["stored"]
 
-        for index, (name, text) in enumerate(CONVERSATION):
-            session.add(
-                SlackMessage(
-                    channel_id=channel_id,
-                    # Slack timestamps are "seconds.microseconds" strings and
-                    # the transcript is ordered by them, so they must ascend.
-                    ts=f"{1740000000 + index * 60}.000100",
-                    user_id=f"USEED{index:02d}",
-                    user_name=name,
-                    text=text,
-                    is_bot=False,
-                )
-            )
-        await session.commit()
+    if stored == 0 and not reset:
+        print(
+            f"{channel_id} already has captured messages. "
+            "Pass --reset to replace them, or use a different channel."
+        )
+        return 1
 
-    print(f"Seeded {len(CONVERSATION)} messages into {channel_id}.")
+    print(f"Seeded {stored} message(s) into {channel_id}.")
     print("Now run `/pm start` in that channel, or `make e2e`.")
     return 0
 
@@ -110,10 +127,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", required=True, help="Slack channel id, e.g. C0123456789")
     parser.add_argument(
-        "--reset", action="store_true", help="delete existing messages for this channel first"
+        "--reset", action="store_true", help="replace existing messages for this channel first"
+    )
+    parser.add_argument(
+        "--api", default=f"http://{settings.api_host}:{settings.api_port}", help="backend base URL"
     )
     args = parser.parse_args()
-    return asyncio.run(seed(args.channel, reset=args.reset))
+    return asyncio.run(seed(args.channel, reset=args.reset, base_url=args.api))
 
 
 if __name__ == "__main__":
